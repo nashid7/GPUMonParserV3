@@ -528,7 +528,9 @@
         {
             _powerColumn ??= headers[gtpIdx];
             var headerRaw = headers[gtpIdx].ToLowerInvariant();
-            var isMilli = headerRaw.Contains("mw");
+            var isMilli = headerRaw.Contains("mw") || headerRaw.Contains("milli");
+            // Heuristic: legacy logs sometimes label as W but values are milliwatts (e.g., 80000).
+            if (!isMilli && gtpMw.Value > 500m) isMilli = true;
             gtpW = isMilli ? gtpMw.Value / 1000m : gtpMw.Value;
             gtpList.Add(gtpW.Value);
         }
