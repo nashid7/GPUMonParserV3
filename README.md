@@ -1,4 +1,4 @@
-![image](https://github.corp.wolf.ca/user-attachments/assets/d7364571-e78f-45df-9829-61d1c2b29fc7)
+![image](https://github.corp.wolf.ca/user-attachments/assets/84daba9d-f749-4e0b-bf33-423439673d1a)
 
 
 # GPU Monitor Log Parser (.NET 9 / Blazor Server)
