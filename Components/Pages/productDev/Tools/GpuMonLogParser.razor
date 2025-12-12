@@ -532,6 +532,8 @@
             // Heuristic: legacy logs sometimes label as W but values are milliwatts (e.g., 80000).
             if (!isMilli && gtpMw.Value > 500m) isMilli = true;
             gtpW = isMilli ? gtpMw.Value / 1000m : gtpMw.Value;
+            // Final guard: if still abnormally high, down-scale once more.
+            if (gtpW.HasValue && gtpW.Value > 1000m) gtpW = gtpW.Value / 1000m;
             gtpList.Add(gtpW.Value);
         }
 
