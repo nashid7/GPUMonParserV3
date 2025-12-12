@@ -1,0 +1,7 @@
+C:\Users\nashid\Desktop\New folder\par\publish\par.exe
+C:\Users\nashid\Desktop\New folder\par\publish\appsettings.Development.json
+C:\Users\nashid\Desktop\New folder\par\publish\appsettings.json
+C:\Users\nashid\Desktop\New folder\par\publish\par.dll
+C:\Users\nashid\Desktop\New folder\par\publish\par.deps.json
+C:\Users\nashid\Desktop\New folder\par\publish\par.runtimeconfig.json
+C:\Users\nashid\Desktop\New folder\par\publish\par.pdb

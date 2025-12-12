@@ -1,0 +1,784 @@
+@page "/productDev/Tools/gpuMonLogParser"
+@using System.Text
+@using System.Text.RegularExpressions
+@using System.Globalization
+@using par.Components.Shared
+@using par.Services
+@inject NotificationService NotificationService
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+@rendermode InteractiveServer
+
+<PageTitle>GPU Monitor Log Parser</PageTitle>
+
+<h3>GPU Monitor Log Parser</h3>
+<p>Upload a GPU Monitor log (.log / .txt / .csv) to extract performance metrics when the GPU is at high utilization.</p>
+
+<div class="panel upload-panel">
+    <div class="upload-actions">
+        <InputFile OnChange="OnFileSelected" accept=".log,.txt,.csv" />
+        <button class="btn btn-secondary btn-sm" @onclick="LoadSampleAsync">Load sample</button>
+    </div>
+    <div class="small-gap"></div>
+    <div class="row-controls">
+        <label>Filter threshold</label>
+        <select @bind="_utilThreshold" class="form-select form-select-sm">
+            <option value="100">Full (99-100)</option>
+            <option value="95">High (95+)</option>
+            <option value="0">All rows (no filter)</option>
+        </select>
+        <button class="btn btn-primary btn-sm" @onclick="ParseAsync" disabled="@(!_fileReady)">Parse Log</button>
+    </div>
+    @if (!string.IsNullOrWhiteSpace(UploadError)) { <div class="text-danger">@UploadError</div>; }
+</div>
+
+@if (ParseComplete)
+{
+    <div class="panel results-panel">
+        <div class="results-header">
+            <div>
+                <p class="eyebrow">Run summary</p>
+                <h4>Metrics at high utilization</h4>
+            </div>
+            <div class="actions">
+                <CopyToClipboard GetTextAsync="GetSummaryClipboardAsync" Tooltip="Copy summary" CopiedTooltip="Summary copied" />
+                <button class="btn btn-secondary btn-sm" @onclick="ExportPdfAsync" disabled="@(!ParseComplete)">Export PDF</button>
+            </div>
+        </div>
+
+        <div class="summary-grid">
+            <div class="summary-card">
+                <label>Coverage</label>
+                <div class="value">@CoverageDisplay</div>
+                <p class="muted">@HighUtilSampleCount.ToString("N0") of @TotalSampleCount.ToString("N0") rows in filter</p>
+            </div>
+            <div class="summary-card">
+                <label>Date</label>
+                <div class="value">@TestDate?.ToString("yyyy-MM-dd")</div>
+                <p class="muted">Duration @DurationDisplay</p>
+            </div>
+            <div class="summary-card">
+                <label>Peak power (W)</label>
+                <div class="value">@Fmt(GtpMaxW)</div>
+                <p class="muted">Power column: @PowerColumnDisplay</p>
+            </div>
+            <div class="summary-card">
+                <label>Throttle events</label>
+                <div class="value">@ThrottleEvents</div>
+                <p class="muted">@ThrottleSummary</p>
+            </div>
+        </div>
+
+        <div class="metrics-grid">
+            <div class="metric group"><strong>GPU Temp (C)</strong></div>
+            <div class="metric"><label>Avg</label><div>@Fmt(GpuTjAvg)</div></div>
+            <div class="metric"><label>Max</label><div>@Fmt(GpuTjMax)</div></div>
+            <div class="metric group"><strong>Memory Temp (C)</strong></div>
+            <div class="metric"><label>Avg</label><div>@Fmt(MemTjAvg)</div></div>
+            <div class="metric"><label>Max</label><div>@Fmt(MemTjMax)</div></div>
+            <div class="metric group"><strong>Power (W)</strong></div>
+            <div class="metric"><label>Avg</label><div>@Fmt(GtpAvgW)</div></div>
+            <div class="metric"><label>Max</label><div>@Fmt(GtpMaxW)</div></div>
+            <div class="metric group"><strong>PCIe</strong></div>
+            <div class="metric"><label>Link Width</label><div>@PcieWidthDisplay</div></div>
+            <div class="metric"><label>Link Speed</label><div>@PcieSpeedDisplay</div></div>
+        </div>
+
+        @if (FilteredSamples.Any())
+        {
+            <div class="panel nested">
+                <div class="panel-head">
+                    <div>
+                        <p class="eyebrow">Charts</p>
+                        <p class="muted">Visualize filtered samples (util @(_utilThreshold)+). Click a chart to expand.</p>
+                    </div>
+                </div>
+                <div class="chart-grid">
+                    <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-gpu"))">
+                        <div class="chart-title">
+                            <p class="eyebrow">GPU Temp (C)</p>
+                            <span class="expand">Expand</span>
+                        </div>
+                        <div class="chart-frame"><canvas id="chart-gpu"></canvas></div>
+                    </div>
+                    <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-power"))">
+                        <div class="chart-title">
+                            <p class="eyebrow">Power (W)</p>
+                            <span class="expand">Expand</span>
+                        </div>
+                        <div class="chart-frame"><canvas id="chart-power"></canvas></div>
+                    </div>
+                    <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-scatter"))">
+                        <div class="chart-title">
+                            <p class="eyebrow">Power vs GPU Temp</p>
+                            <span class="expand">Expand</span>
+                        </div>
+                        <div class="chart-frame"><canvas id="chart-scatter"></canvas></div>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+<div class="chart-modal @(ShowChartModal ? "show" : "")" @onclick="CloseChartModal">
+    <div class="chart-modal-body" @onclick:stopPropagation="true">
+        <div class="chart-modal-header">
+            <span>Chart</span>
+            <button class="btn btn-sm btn-secondary" @onclick="CloseChartModal">Close</button>
+        </div>
+        <div class="chart-modal-frame">
+            <canvas id="chart-modal-canvas"></canvas>
+        </div>
+    </div>
+</div>
+
+<style>
+    .upload-panel, .results-panel { border:1px solid #1f2d4a; padding:18px; border-radius:14px; background:linear-gradient(160deg,#0f172a,#0c1627); margin-top:16px; box-shadow:0 16px 48px rgba(0,0,0,0.4); color:#e5e7eb; }
+    .panel.nested { margin-top:14px; background:#0b1324; border:1px solid #1f2d4a; }
+    .panel-head{display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:8px;}
+    .small-gap{height:6px;}
+    .upload-actions{display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
+    .row-controls{display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+    .metrics-grid{display:grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap:8px; margin-top:15px;}
+    .metric{background:#111a2e; border:1px solid #1f2d4a; padding:10px 12px; border-radius:8px; font-size:0.92rem; color:#e5e7eb;}
+    .metric label{display:block; font-size:0.68rem; text-transform:uppercase; color:#cbd5e1; letter-spacing:.5px;}
+    .metric.group{grid-column:1/-1; background:#0b1324; text-align:left; font-size:0.9rem; color:#e5e7eb;}
+    .log-lines{max-height:300px; overflow:auto; background:#0a1120; color:#e2e8f0; font-family:monospace; padding:12px; margin-top:6px; font-size:0.84rem; border-radius:8px; border:1px solid #1f2d4a;}
+    .results-header{display:flex; align-items:center; justify-content:space-between; gap:12px;}
+    .summary-grid{display:grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin:12px 0;}
+    .summary-card{background:#111a2e; border:1px solid #1f2d4a; border-radius:10px; padding:12px; color:#e5e7eb;}
+    .summary-card label{font-size:0.72rem; text-transform:uppercase; color:#cbd5e1; letter-spacing:.3px;}
+    .summary-card .value{font-size:1.25rem; font-weight:700; color:#f8fafc;}
+    .summary-card .muted{margin-top:2px;}
+    .muted{color:#cbd5e1; font-size:0.88rem;}
+    .eyebrow{font-size:0.7rem; text-transform:uppercase; letter-spacing:.4px; color:#cbd5e1; margin:0;}
+    .actions{display:flex; gap:8px;}
+    .list{list-style:none; padding:0; margin:0; display:grid; gap:6px;}
+    .chart-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px;}
+    .chart-card{background:#111a2e; border:1px solid #1f2d4a; border-radius:10px; padding:10px; cursor:pointer; transition:transform .15s ease, border-color .15s ease;}
+    .chart-card:hover{transform:translateY(-2px); border-color:#38bdf8;}
+    .chart-frame{height:240px;}
+    select.form-select { background-color:#0b1324; border:1px solid #1f2d4a; color:#e5e7eb; }
+    button.btn { border-radius:8px; }
+    .chart-title{display:flex; justify-content:space-between; align-items:center;}
+    .chart-title .expand{font-size:0.75rem; color:#93c5fd;}
+    .chart-modal{position:fixed; inset:0; background:rgba(6,10,18,0.76); backdrop-filter: blur(5px); display:flex; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition:opacity .2s ease;}
+    .chart-modal.show{opacity:1; pointer-events:auto;}
+    .chart-modal-body{background:#0b1324; border:1px solid #1f2d4a; border-radius:12px; padding:14px; width: min(90vw, 1100px); height:min(85vh, 700px); display:flex; flex-direction:column; box-shadow:0 30px 80px rgba(0,0,0,0.55);}
+    .chart-modal-header{display:flex; justify-content:space-between; align-items:center; color:#e5e7eb; margin-bottom:8px;}
+    .chart-modal-frame{flex:1; background:#0a1120; border:1px solid #1f2d4a; border-radius:10px; padding:10px;}
+    .chart-modal-frame canvas{width:100%!important; height:100%!important;}
+</style>
+
+@code {
+    private IBrowserFile? _file;
+    private bool _fileReady => _file is not null;
+    private string UploadError { get; set; } = string.Empty;
+    private int _utilThreshold { get; set; } = 100; // 100 -> 99-100, 95 -> 95+
+    private string PowerColumnDisplay => _powerColumn ?? "n/a";
+    private string UtilColumnDisplay => _utilColumn ?? "n/a";
+
+    // Parsed metrics
+    private DateTime? TestDate { get; set; }
+    private int HighUtilSampleCount { get; set; }
+    private int TotalSampleCount { get; set; }
+    private decimal? GpuTjAvg; private decimal? GpuTjMin; private decimal? GpuTjMax;
+    private decimal? MemTjAvg; private decimal? MemTjMin; private decimal? MemTjMax;
+    private decimal? GtpAvgW; private decimal? GtpMinW; private decimal? GtpMaxW; // in W (converted)
+    private string? _powerColumn;
+    private string? _utilColumn;
+    private string? PcieWidthDisplay; private string? PcieSpeedDisplay;
+    private int? _maxUtil;
+    private int ThrottleEvents { get; set; }
+    private Dictionary<string, int> ThrottleBreakdown { get; set; } = new();
+    private TimeSpan Duration { get; set; }
+    private string DurationDisplay => Duration == TimeSpan.Zero ? "" : Duration.ToString();
+    private string CoverageDisplay => TotalSampleCount == 0 ? "--" : $"{(HighUtilSampleCount * 100m / TotalSampleCount):0.0}%";
+    private string ThrottleSummary => ThrottleEvents == 0 ? "No throttling detected." : $"{ThrottleEvents} events in filter window.";
+    private List<string> FilteredLines { get; set; } = new();
+    private List<SamplePoint> FilteredSamples { get; set; } = new();
+    private bool ParseComplete { get; set; }
+    private bool ShowChartModal { get; set; }
+    private string? _modalSourceId;
+    private bool _chartsDirty;
+
+    private record SamplePoint(int Index, decimal? GpuTj, decimal? MemTj, decimal? PowerW, int? Util, DateTime? Timestamp);
+
+    private Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        _file = e.File;
+        UploadError = string.Empty;
+        ParseComplete = false;
+        FilteredLines.Clear();
+
+        var ext = Path.GetExtension(_file.Name).ToLowerInvariant();
+        if (ext is not ".log" and not ".txt" and not ".csv")
+        {
+            UploadError = "Invalid file type";
+            _file = null;
+        }
+        return Task.CompletedTask;
+    }
+
+    private async Task LoadSampleAsync()
+    {
+        var sample = @"date,time,1:gpc_util,1:t_gpu,1:mem_temp,1:pwr_tgp,1:pcie_gpu_width,1:pcie_gpu_speed,1:capping_reason
+2025-08-27,05:11:31,99,72,70,145000,16,4,none
+2025-08-27,05:11:37,98,71,69,130000,16,4,util
+2025-08-27,05:11:44,100,74,73,155000,16,4,pwr
+2025-08-27,05:11:53,96,73,72,125000,16,4,util
+2025-08-27,05:12:02,99,75,74,160000,16,4,thermal";
+        var ok = ParseFile(sample.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None));
+        ParseComplete = ok;
+        _file = null;
+        UploadError = string.Empty;
+        await Task.CompletedTask;
+    }
+
+    private async Task ParseAsync()
+    {
+        if (_file is null) { NotificationService.NotifyError("No file."); return; }
+        try
+        {
+            using var ms = new MemoryStream();
+            const long maxSize = 50 * 1024 * 1024; // 50 MB
+            await _file.OpenReadStream(maxSize).CopyToAsync(ms);
+            var content = Encoding.UTF8.GetString(ms.ToArray());
+            var lines = SplitLines(content);
+            var ok = ParseFile(lines);
+            ParseComplete = ok;
+            if (ok)
+            {
+                if (HighUtilSampleCount == 0)
+                {
+                    var tip = _maxUtil.HasValue
+                        ? $"Highest gpc_util observed: {_maxUtil.Value}. Try lowering the threshold (or use All rows). Util column: {UtilColumnDisplay}"
+                        : $"Check the gpc_util column name and threshold. Util column detected: {UtilColumnDisplay}";
+                    NotificationService.NotifyError($"No rows matched the utilization filter ({_utilThreshold}+). {tip}");
+                }
+                else
+                {
+                    NotificationService.NotifySuccess("Parse complete.");
+                }
+            }
+        }
+        catch (IOException ex) when (ex.Message.Contains("length", StringComparison.OrdinalIgnoreCase))
+        {
+            NotificationService.NotifyError("File is too large. Max 50 MB.");
+        }
+        catch (Exception ex)
+        {
+            NotificationService.NotifyError($"Parse failed: {ex.Message}");
+        }
+    }
+
+    private string[] SplitLines(string content)
+        => content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+    private bool ParseFile(string[] lines)
+    {
+        // reset
+        TestDate = null; HighUtilSampleCount = 0; TotalSampleCount = 0; ThrottleEvents = 0;
+        ThrottleBreakdown = new(); _powerColumn = null; _utilColumn = null; _maxUtil = null;
+        GpuTjAvg = GpuTjMin = GpuTjMax = null; MemTjAvg = MemTjMin = MemTjMax = null; GtpAvgW = GtpMinW = GtpMaxW = null; PcieSpeedDisplay = PcieWidthDisplay = null; Duration = TimeSpan.Zero; FilteredLines.Clear(); FilteredSamples.Clear();
+        var gpuTjList = new List<decimal>(); var memTjList = new List<decimal>(); var gtpList = new List<decimal>();
+        DateTime? firstTs = null; DateTime? lastTs = null;
+
+        // Decide if CSV (header row containing comma + one of known columns) else raw log
+        var parsed = false;
+        if (lines.Length > 0 && IsCsvHeader(lines))
+            parsed = ParseCsv(lines, gpuTjList, memTjList, gtpList, ref firstTs, ref lastTs);
+        else
+        {
+            ParseRegexLog(lines, gpuTjList, memTjList, gtpList, ref firstTs, ref lastTs);
+            parsed = true;
+        }
+
+        if (!parsed) return false;
+
+        if (firstTs.HasValue && lastTs.HasValue) Duration = lastTs.Value - firstTs.Value;
+        if (gpuTjList.Any()) { GpuTjAvg = gpuTjList.Average(); GpuTjMax = gpuTjList.Max(); }
+        if (memTjList.Any()) { MemTjAvg = memTjList.Average(); MemTjMax = memTjList.Max(); }
+        if (gtpList.Any()) { GtpAvgW = gtpList.Average(); GtpMaxW = gtpList.Max(); }
+
+        _chartsDirty = FilteredSamples.Any();
+        return true;
+    }
+
+    private bool IsCsvHeader(string[] lines)
+    {
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            if (!line.Contains(',') && !line.Contains('\t') && !Regex.IsMatch(line, @"\s{2,}")) continue;
+            var lower = line.ToLowerInvariant();
+            if (lower.Contains("date") && (lower.Contains("time") || lower.Contains("timestamp")))
+                return true;
+            if (lower.Contains("iteration") && lower.Contains("gpu util"))
+                return true;
+            // keep scanning in case early lines are preamble
+        }
+        return false;
+    }
+
+    private bool ParseCsv(string[] lines, List<decimal> gpuTjList, List<decimal> memTjList, List<decimal> gtpList, ref DateTime? firstTs, ref DateTime? lastTs)
+    {
+        int headerIndex = -1;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var l = lines[i];
+            if (string.IsNullOrWhiteSpace(l)) continue;
+            var lower = l.ToLowerInvariant();
+            if ((l.Contains(',') || l.Contains('\t')) && lower.Contains("date") && (lower.Contains("time") || lower.Contains("timestamp") || lower.Contains("gpc") || lower.Contains("gpu util")))
+            {
+                headerIndex = i;
+                break;
+            }
+        }
+        if (headerIndex < 0) return false;
+        var delimiter = lines[headerIndex].Contains('\t') ? '\t' : ',';
+        var headers = SplitDelimitedLine(lines[headerIndex], delimiter);
+        if (headers.Length == 1)
+        {
+            headers = Regex.Split(lines[headerIndex].Trim(), @"\s+");
+            delimiter = ' ';
+        }
+
+        string CleanHeader(string h)
+        {
+            h = h.Trim().Trim('"').ToLowerInvariant();
+            if (h.Length > 1 && char.IsDigit(h[0]) && h.Contains(':'))
+            {
+                var idx = h.IndexOf(':');
+                h = h[(idx + 1)..];
+            }
+            var paren = h.IndexOf('(');
+            if (paren >= 0) h = h[..paren];
+            h = h.Replace("%", "").Replace("/", " ").Replace("-", " ");
+            h = string.Join('_', h.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries));
+            h = h.Replace("__", "_").Trim('_').Trim();
+            return h;
+        }
+        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var rawHeaders = new List<string>();
+        var cleanedHeaders = new List<string>();
+        for (int i = 0; i < headers.Length; i++)
+        {
+            var clean = CleanHeader(headers[i]);
+            rawHeaders.Add(headers[i]);
+            cleanedHeaders.Add(clean);
+            if (!map.ContainsKey(clean)) map[clean] = i;
+        }
+
+        int GetIdx(params string[] names)
+        {
+            foreach (var n in names)
+                if (map.TryGetValue(n, out var idx)) return idx;
+            return -1;
+        }
+
+        var dateIdx = GetIdx("date");
+        var timeIdx = GetIdx("time", "timestamp");
+        var tsIdx = GetIdx("timestamp", "datetime");
+        var gpcIdx = GetIdx("gpc_util", "gpc", "util", "gpu_util", "gpu_utilization", "gpu_utilization");
+        if (gpcIdx < 0)
+        {
+            for (int i = 0; i < rawHeaders.Count; i++)
+            {
+                var rawLower = rawHeaders[i].ToLowerInvariant();
+                if (rawLower.Contains("gpu util") || rawLower.Contains("utilization"))
+                {
+                    gpcIdx = i;
+                    break;
+                }
+            }
+        }
+        if (gpcIdx < 0)
+        {
+            foreach (var kvp in map)
+            {
+                var key = kvp.Key.ToLowerInvariant();
+                if (key.Contains("gpu") && key.Contains("util"))
+                {
+                    gpcIdx = kvp.Value;
+                    break;
+                }
+            }
+        }
+        if (gpcIdx < 0)
+        {
+            foreach (var kvp in map)
+            {
+                var key = kvp.Key.ToLowerInvariant();
+                if (key.Contains("util"))
+                {
+                    gpcIdx = kvp.Value;
+                    break;
+                }
+            }
+        }
+        if (gpcIdx < 0)
+        {
+            for (int i = 0; i < cleanedHeaders.Count; i++)
+            {
+                var key = cleanedHeaders[i];
+                if (key.Contains("gpu") && key.Contains("util"))
+                {
+                    gpcIdx = i;
+                    break;
+                }
+            }
+        }
+        if (gpcIdx < 0)
+        {
+            for (int i = 0; i < cleanedHeaders.Count; i++)
+            {
+                var key = cleanedHeaders[i];
+                if (key.Contains("util"))
+                {
+                    gpcIdx = i;
+                    break;
+                }
+            }
+        }
+        if (gpcIdx < 0)
+        {
+            foreach (var kvp in map)
+            {
+                var key = kvp.Key.ToLowerInvariant();
+                if (key.Contains("gpu_util") || key.Contains("utilization"))
+                {
+                    gpcIdx = kvp.Value;
+                    break;
+                }
+            }
+        }
+        var gpuIdx = GetIdx("gpu_tj", "t_gpu", "gpu_temp", "gpu_temp_c", "gpu_t", "temperature_gpu");
+        var memIdx = GetIdx("mem_tj", "mem_temp", "memory_tj", "mem_t", "temperature_memory");
+        var gtpIdx = GetIdx("gtp", "pwr_tgp", "gpu_power", "power_mw", "gtp_mw", "tpp_measured", "tgp", "tgp_w");
+        var widthIdx = GetIdx("pcie_width", "pcie_gpu_width", "pcie_link_width", "pcie_width_current");
+        var speedIdx = GetIdx("pcie_speed", "pcie_gpu_speed", "pcie_link_speed", "pcie_speed_current");
+        var reasonIdx = GetIdx("capping_reason", "throttle_reason", "reason");
+
+        if (gpcIdx < 0)
+        {
+            NotificationService.NotifyError($"No gpc_util column detected in the CSV header. Found util-like headers: {string.Join(", ", cleanedHeaders.Where(h => h.Contains("util")))}");
+            return false;
+        }
+        _utilColumn = headers[gpcIdx];
+
+        for (int li = headerIndex + 1; li < lines.Length; li++)
+        {
+            var raw = lines[li]; if (string.IsNullOrWhiteSpace(raw)) continue;
+            TotalSampleCount++;
+            var cols = SplitDelimitedLine(raw, delimiter);
+            if (cols.Length == 1 && raw.Contains(' '))
+            {
+                cols = Regex.Split(raw.Trim(), @"\s+");
+            }
+            try
+            {
+                var gpcUtilDec = ParseDecimal(cols, gpcIdx);
+                if (gpcUtilDec.HasValue)
+                {
+                    var gpcInt = (int)Math.Round(gpcUtilDec.Value);
+                    _maxUtil = _maxUtil.HasValue ? Math.Max(_maxUtil.Value, gpcInt) : gpcInt;
+                }
+                if (gpcUtilDec is null) continue;
+                var gpcUtil = gpcUtilDec.Value;
+                var thresholdOk = _utilThreshold <= 0
+                    ? true
+                    : _utilThreshold == 100
+                        ? (gpcUtil >= 99m)
+                        : gpcUtil >= _utilThreshold;
+                if (!thresholdOk) continue;
+
+                DateTime? ts = null;
+        if (tsIdx >= 0 && dateIdx >= 0)
+        {
+            var d = SafeString(cols, dateIdx);
+            var t = SafeString(cols, tsIdx);
+            if (!string.IsNullOrWhiteSpace(d) && !string.IsNullOrWhiteSpace(t))
+            {
+                var combined = d + " " + t;
+                ts = ParseDateTimeCombined(combined);
+            }
+        }
+        else if (dateIdx >= 0 && timeIdx >= 0)
+        {
+            var d = SafeString(cols, dateIdx);
+            var t = SafeString(cols, timeIdx);
+            if (!string.IsNullOrWhiteSpace(d) && !string.IsNullOrWhiteSpace(t))
+            {
+                var combined = d + " " + t;
+                ts = ParseDateTimeCombined(combined);
+            }
+        }
+                if (ts.HasValue)
+                {
+                    firstTs ??= ts; lastTs = ts; TestDate ??= ts.Value.Date;
+                }
+
+                var gpuTj = ParseDecimal(cols, gpuIdx); if (gpuTj.HasValue) gpuTjList.Add(gpuTj.Value);
+                var memTj = ParseDecimal(cols, memIdx); if (memTj.HasValue) memTjList.Add(memTj.Value);
+                decimal? gtpW = null;
+        var gtpMw = ParseDecimal(cols, gtpIdx);
+        if (gtpMw.HasValue)
+        {
+            _powerColumn ??= headers[gtpIdx];
+            var headerRaw = headers[gtpIdx].ToLowerInvariant();
+            var isMilli = headerRaw.Contains("mw");
+            gtpW = isMilli ? gtpMw.Value / 1000m : gtpMw.Value;
+            gtpList.Add(gtpW.Value);
+        }
+
+                var reasonRaw = SafeString(cols, reasonIdx);
+                if (!string.IsNullOrWhiteSpace(reasonRaw) && !reasonRaw.Equals("none", StringComparison.OrdinalIgnoreCase))
+                {
+                    ThrottleEvents++;
+                    var norm = reasonRaw.Trim();
+                    ThrottleBreakdown[norm] = ThrottleBreakdown.TryGetValue(norm, out var c) ? c + 1 : 1;
+                }
+
+                if (string.IsNullOrEmpty(PcieWidthDisplay) && widthIdx >= 0 && widthIdx < cols.Length)
+                {
+                    var wRaw = SafeString(cols, widthIdx);
+                    if (!string.IsNullOrWhiteSpace(wRaw))
+                        PcieWidthDisplay = wRaw.StartsWith("x", StringComparison.OrdinalIgnoreCase) ? wRaw : ($"x{wRaw}");
+                }
+                if (string.IsNullOrEmpty(PcieSpeedDisplay) && speedIdx >= 0 && speedIdx < cols.Length)
+                {
+                    var sRaw = SafeString(cols, speedIdx);
+                    if (!string.IsNullOrWhiteSpace(sRaw))
+                        if (int.TryParse(sRaw, out var gen) && gen > 0 && gen < 10) PcieSpeedDisplay = $"Gen{gen}"; else PcieSpeedDisplay = sRaw;
+                }
+
+                int? utilInt = gpcUtilDec.HasValue ? (int?)Math.Round(gpcUtilDec.Value) : null;
+                FilteredSamples.Add(new SamplePoint(FilteredSamples.Count, gpuTj, memTj, gtpW, utilInt, ts));
+                HighUtilSampleCount++;
+                FilteredLines.Add(raw);
+            }
+            catch
+            {
+                // ignore malformed rows
+            }
+        }
+        return true;
+    }
+
+    private void ParseRegexLog(string[] lines, List<decimal> gpuTjList, List<decimal> memTjList, List<decimal> gtpList, ref DateTime? firstTs, ref DateTime? lastTs)
+    {
+        var lineRegex = new Regex(@"(?<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?gpc_util=(?<gpc>\d+)" +
+                                  @".*?gpu_tj=(?<gpu>-?\d+(?:\.\d+)?)" +
+                                  @".*?mem_tj=(?<mem>-?\d+(?:\.\d+)?)" +
+                                  @".*?gtp=(?<gtp>-?\d+(?:\.\d+)?)" +
+                                  @".*?pcie_width=(?<width>x?\d+)" +
+                                  @".*?pcie_speed=(?<speed>[^\s]+)" +
+                                  @"(?:.*?capping_reason=(?<reason>[^\s]+))?", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        foreach (var raw in lines)
+        {
+            TotalSampleCount++;
+            var m = lineRegex.Match(raw);
+            if (!m.Success) continue;
+            if (!int.TryParse(m.Groups["gpc"].Value, out var gpcUtil)) continue;
+            _maxUtil = _maxUtil.HasValue ? Math.Max(_maxUtil.Value, gpcUtil) : gpcUtil;
+            var thresholdOk = _utilThreshold <= 0 ? true : _utilThreshold == 100 ? (gpcUtil == 99 || gpcUtil == 100) : gpcUtil >= _utilThreshold;
+            if (!thresholdOk) continue;
+            if (DateTime.TryParse(m.Groups["ts"].Value, out var ts))
+                firstTs ??= ts; lastTs = ts; TestDate ??= ts.Date;
+            if (decimal.TryParse(m.Groups["gpu"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var gpuTj)) gpuTjList.Add(gpuTj);
+            if (decimal.TryParse(m.Groups["mem"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var memTj)) memTjList.Add(memTj);
+            if (decimal.TryParse(m.Groups["gtp"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var gtpMw)) gtpList.Add(gtpMw / 1000m);
+            if (string.IsNullOrEmpty(PcieWidthDisplay)) PcieWidthDisplay = m.Groups["width"].Value;
+            if (string.IsNullOrEmpty(PcieSpeedDisplay)) PcieSpeedDisplay = m.Groups["speed"].Value;
+
+            var reason = m.Groups["reason"].Value;
+            if (!string.IsNullOrWhiteSpace(reason))
+            {
+                ThrottleEvents++;
+                var norm = reason.Trim();
+                ThrottleBreakdown[norm] = ThrottleBreakdown.TryGetValue(norm, out var c) ? c + 1 : 1;
+            }
+
+            FilteredSamples.Add(new SamplePoint(FilteredSamples.Count, gpuTj, memTj, gtpMw / 1000m, gpcUtil, ts));
+            HighUtilSampleCount++;
+            FilteredLines.Add(raw);
+        }
+    }
+
+    private string[] SplitDelimitedLine(string line, char delimiter)
+    {
+        var result = new List<string>();
+        var sb = new StringBuilder(); bool inQuotes = false;
+        for (int i = 0; i < line.Length; i++)
+        {
+            var c = line[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                continue;
+            }
+            if (c == delimiter && !inQuotes)
+            {
+                result.Add(sb.ToString());
+                sb.Clear();
+                continue;
+            }
+            sb.Append(c);
+        }
+        result.Add(sb.ToString());
+        return result.Select(s => s.Trim()).ToArray();
+    }
+
+    private string SafeString(string[] cols, int idx)
+        => (idx >= 0 && idx < cols.Length) ? cols[idx].Trim().Trim('"') : string.Empty;
+
+    private bool IsNA(string? raw) => string.IsNullOrWhiteSpace(raw) || raw.Equals("n/a", StringComparison.OrdinalIgnoreCase) || raw.Equals("na", StringComparison.OrdinalIgnoreCase);
+
+    private int? ParseInt(string[] cols, int idx)
+    {
+        if (idx < 0 || idx >= cols.Length) return null; var raw = cols[idx].Trim().Trim('"'); if (IsNA(raw)) return null;
+        return int.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : null;
+    }
+    private decimal? ParseDecimal(string[] cols, int idx)
+    {
+        if (idx < 0 || idx >= cols.Length) return null; var raw = cols[idx].Trim().Trim('"'); if (IsNA(raw)) return null;
+        return decimal.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : null;
+    }
+    private DateTime? ParseDateTime(string[] cols, int idx)
+    {
+        if (idx < 0 || idx >= cols.Length) return null; var raw = cols[idx].Trim('"'); if (IsNA(raw)) return null;
+        return ParseDateTimeCombined(raw);
+    }
+
+    private DateTime? ParseDateTimeCombined(string combined)
+    {
+        // handle times like 12:48:29:248 by turning last ':' into '.'
+        string Normalize(string s)
+        {
+            var parts = s.Split(':');
+            if (parts.Length >= 4)
+            {
+                var last = parts[^1];
+                var rest = string.Join(':', parts.Take(parts.Length - 1));
+                return $"{rest}.{last}";
+            }
+            return s;
+        }
+
+        var norm = Normalize(combined);
+        if (DateTime.TryParse(norm, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dt)) return dt;
+        if (DateTime.TryParse(norm, out dt)) return dt; return null;
+    }
+
+    private string Fmt(decimal? v) => v.HasValue ? string.Format(CultureInfo.InvariantCulture, "{0:0.##}", v.Value) : "";
+
+    private Task<string> GetSummaryClipboardAsync()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Date: {TestDate:yyyy-MM-dd}");
+        sb.AppendLine($"Duration: {DurationDisplay}");
+        sb.AppendLine($"Rows (filter {_utilThreshold}+): {HighUtilSampleCount}/{TotalSampleCount} ({CoverageDisplay})");
+        sb.AppendLine($"GPU Temp C  Avg={Fmt(GpuTjAvg)}  Max={Fmt(GpuTjMax)}");
+        sb.AppendLine($"Memory Temp C  Avg={Fmt(MemTjAvg)}  Max={Fmt(MemTjMax)}");
+        sb.AppendLine($"Power W  Avg={Fmt(GtpAvgW)}  Max={Fmt(GtpMaxW)}");
+        sb.AppendLine($"PCIe Width={PcieWidthDisplay}  Speed={PcieSpeedDisplay}");
+        sb.AppendLine($"Throttle events: {ThrottleEvents}");
+        return Task.FromResult(sb.ToString());
+    }
+
+    private Task<string> GetRawFilteredAsync() => Task.FromResult(string.Join('\n', FilteredLines));
+
+    private async Task RenderChartsAsync()
+    {
+        if (!FilteredSamples.Any()) return;
+        try
+        {
+            var labels = FilteredSamples.Select(s => s.Timestamp?.ToString("HH:mm:ss") ?? $"#{s.Index + 1}").ToArray();
+            var gpu = FilteredSamples.Select(s => s.GpuTj).ToArray();
+            var power = FilteredSamples.Select(s => s.PowerW).ToArray();
+            var scatter = FilteredSamples.Where(s => s.PowerW.HasValue && s.GpuTj.HasValue)
+                .Select(s => new { x = s.PowerW, y = s.GpuTj }).ToArray();
+
+            await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-gpu", labels, gpu, "GPU Temp (C)", "#3b82f6");
+            await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-power", labels, power, "Power (W)", "#22c55e");
+            await JS.InvokeVoidAsync("gpuCharts.renderScatter", "chart-scatter", scatter, "Power (W)", "GPU Temp (C)", "#a855f7");
+        }
+        catch
+        {
+            // ignore chart failures
+        }
+    }
+
+    private async Task OpenChartModalAsync(string sourceId)
+    {
+        _modalSourceId = sourceId;
+        ShowChartModal = true;
+        StateHasChanged();
+        await Task.Delay(30); // allow modal canvas to render
+        try
+        {
+            await JS.InvokeVoidAsync("gpuCharts.openModalFrom", "chart-modal-canvas", sourceId);
+        }
+        catch { }
+    }
+
+    private async Task CloseChartModal()
+    {
+        ShowChartModal = false;
+        _modalSourceId = null;
+        StateHasChanged();
+        try { await JS.InvokeVoidAsync("gpuCharts.destroy", "chart-modal-canvas"); } catch { }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_chartsDirty && ParseComplete)
+        {
+            _chartsDirty = false;
+            await RenderChartsAsync();
+        }
+        await base.OnAfterRenderAsync(firstRender);
+    }
+
+    private async Task ExportPdfAsync()
+    {
+        try
+        {
+            var summary = new
+            {
+                Date = TestDate?.ToString("yyyy-MM-dd") ?? "",
+                Duration = DurationDisplay,
+                Coverage = CoverageDisplay,
+                Rows = $"{HighUtilSampleCount}/{TotalSampleCount}",
+                Filter = _utilThreshold <= 0 ? "All rows" : $"{_utilThreshold}+ util",
+                GpuTjAvg = Fmt(GpuTjAvg),
+                GpuTjMax = Fmt(GpuTjMax),
+                MemTjAvg = Fmt(MemTjAvg),
+                MemTjMax = Fmt(MemTjMax),
+                PowerAvg = Fmt(GtpAvgW),
+                PowerMax = Fmt(GtpMaxW),
+                UtilColumn = UtilColumnDisplay,
+                PowerColumn = PowerColumnDisplay,
+                ThrottleEvents,
+                PcieWidth = PcieWidthDisplay,
+                PcieSpeed = PcieSpeedDisplay
+            };
+
+            var throttle = ThrottleBreakdown.Select(kv => new { Reason = kv.Key, Count = kv.Value }).ToList();
+            var filtered = FilteredLines.Take(50).ToList();
+
+            await JS.InvokeVoidAsync("gpuExport.exportEngineeringPdf",
+                summary,
+                throttle,
+                filtered,
+                $"gpu-log-report-{DateTime.Now:yyyyMMddHHmmss}.pdf");
+        }
+        catch (Exception ex)
+        {
+            NotificationService.NotifyError($"PDF export failed: {ex.Message}");
+        }
+    }
+}

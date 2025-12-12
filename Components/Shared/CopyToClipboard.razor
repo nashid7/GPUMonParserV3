@@ -1,0 +1,80 @@
+@inject IJSRuntime Js
+
+<div class="wolf-copy-wrapper @CssClass" @onmouseleave="OnMouseLeave">
+    <button class="wolf-copy-btn btn btn-outline-secondary btn-sm"
+            title="@CurrentTooltip"
+            @onclick="CopyAsync"
+            disabled="@(!Enabled)">
+        @(_copied ? "Copied" : "Copy")
+    </button>
+    @if (ShowLabel && !string.IsNullOrWhiteSpace(Label))
+    {
+        <span class="wolf-copy-label">@Label</span>
+    }
+</div>
+
+@code {
+    [Parameter] public string? Text { get; set; }
+    [Parameter] public Func<Task<string>>? GetTextAsync { get; set; }
+    [Parameter] public string Tooltip { get; set; } = "Copy to clipboard";
+    [Parameter] public string CopiedTooltip { get; set; } = "Copied to clipboard";
+    [Parameter] public string? CssClass { get; set; }
+    [Parameter] public bool AutoReset { get; set; } = true;
+    [Parameter] public int ResetDelayMs { get; set; } = 1600;
+    [Parameter] public EventCallback OnCopied { get; set; }
+    [Parameter] public bool ShowLabel { get; set; }
+    [Parameter] public string? Label { get; set; }
+    [Parameter] public bool Enabled { get; set; } = true;
+
+    private bool _copied;
+    private string CurrentTooltip => _copied ? CopiedTooltip : Tooltip;
+    private CancellationTokenSource? _resetCts;
+
+    private async Task CopyAsync()
+    {
+        if (!Enabled) return;
+        var value = Text;
+        if (string.IsNullOrEmpty(value) && GetTextAsync is not null)
+        {
+            value = await GetTextAsync.Invoke();
+        }
+        if (string.IsNullOrEmpty(value)) return;
+
+        var ok = await Js.InvokeAsync<bool>("wolfDenCopyToClipboard", value);
+        if (ok)
+        {
+            _copied = true;
+            await OnCopied.InvokeAsync();
+            StateHasChanged();
+            if (AutoReset)
+            {
+                _resetCts?.Cancel();
+                _resetCts = new CancellationTokenSource();
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(ResetDelayMs, _resetCts.Token);
+                        _copied = false;
+                        await InvokeAsync(StateHasChanged);
+                    }
+                    catch (TaskCanceledException) { }
+                });
+            }
+        }
+    }
+
+    private void OnMouseLeave()
+    {
+        if (AutoReset && _copied)
+        {
+            _copied = false;
+        }
+    }
+}
+
+<style>
+    .wolf-copy-wrapper { display:inline-flex; align-items:center; gap:4px; position:relative; }
+    .wolf-copy-btn { min-width:60px; }
+    .wolf-copy-label { font-size:0.8rem; color:#444; }
+</style>
