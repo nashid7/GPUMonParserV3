@@ -23,6 +23,9 @@ Open `http://localhost:5200/productDev/Tools/gpuMonLogParser`.
 
 This repo includes a `Dockerfile` for deploying the Blazor Server app to Render or any container host.
 
+Live test deployment:
+- https://gpumonparserv3.onrender.com/productDev/Tools/gpuMonLogParser
+
 ## Repo notes
 - Frontend: Blazor Server (.NET 9)
 - Charts: `wwwroot/js/charts.js`
