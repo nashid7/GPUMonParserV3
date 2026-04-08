@@ -1,0 +1,10 @@
+bin/
+obj/
+publish/
+.codex-build-out/
+.vs/
+.vscode/
+*.user
+*.suo
+*.cache
+*.log
