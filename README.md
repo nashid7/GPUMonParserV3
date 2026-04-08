@@ -1,3 +1,4 @@
+<img width="814" height="932" alt="image" src="https://github.corp.wolf.ca/user-attachments/assets/8f573800-89ca-4de5-85c2-824bdd375d46" />
 # GPU Monitor Log Parser (.NET 9 / Blazor Server)
 
 Lightweight internal tool to parse NVIDIA GPUMON logs (legacy and new formats), filter on GPU utilization, visualize temps/power, and export an engineering PDF.
