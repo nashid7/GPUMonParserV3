@@ -62,6 +62,7 @@ window.gpuExport = (() => {
         const metricRows = [
             { Metric: "GPU Temp (Avg/Max)", Value: `${v(summary.GpuTjAvg)} / ${v(summary.GpuTjMax)}` },
             { Metric: "Memory Temp (Avg/Max)", Value: `${v(summary.MemTjAvg)} / ${v(summary.MemTjMax)}` },
+            { Metric: "GPC Clock MHz (Avg/Max)", Value: `${v(summary.GpcClockAvg)} / ${v(summary.GpcClockMax)}` },
             { Metric: "Power W (Avg/Max)", Value: `${v(summary.PowerAvg)} / ${v(summary.PowerMax)}` },
             { Metric: "PCIe", Value: `${v(summary.PcieWidth)} / ${v(summary.PcieSpeed)}` },
             { Metric: "Throttle events", Value: v(summary.ThrottleEvents) }
