@@ -6,7 +6,7 @@ Lightweight internal tool to parse NVIDIA GPUMON logs (legacy and new formats), 
 - Upload `.csv/.log/.txt` GPUMON outputs.
 - Supports multiple GPUMON header variants across old and new log versions.
 - Dynamic utilization range filtering.
-- Metrics for GPU temp, memory temp, power, GPC clock, PCIe link info, and throttle events.
+- Metrics for GPU temperature, memory temperature, power, GPC clock, memory clock, P-State activity, and capping activity.
 - Charts for GPU temp, power, and power vs GPU temp with expandable modal view.
 - PDF export via `html2canvas` and `jsPDF`.
 - Clipboard copy of summary.
