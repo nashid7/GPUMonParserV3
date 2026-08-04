@@ -35,7 +35,7 @@ window.gpuExport = (() => {
         return startY + 8;
     };
 
-    const exportEngineeringPdf = async (summary, throttle, filteredLines, filename) => {
+    const exportEngineeringPdf = async (summary, capping, filteredLines, filename) => {
         if (!ensureDeps()) return;
         const { jsPDF } = window.jspdf;
         const pdf = new jsPDF("p", "mm", "a4");
@@ -55,22 +55,25 @@ window.gpuExport = (() => {
             { Metric: "Coverage", Value: `${v(summary.Coverage)} (${v(summary.Rows)} rows)` },
             { Metric: "Filter", Value: v(summary.Filter) },
             { Metric: "Util column", Value: v(summary.UtilColumn) },
-            { Metric: "Power column", Value: v(summary.PowerColumn) }
+            { Metric: "Power column", Value: v(summary.PowerColumn) },
+            { Metric: "GPU", Value: v(summary.BrandName) },
+            { Metric: "VBIOS", Value: v(summary.VbiosVersion) },
+            { Metric: "Driver", Value: v(summary.DriverVersion) }
         ];
         let y = addTable(pdf, "Summary", summaryRows, 32);
 
         const metricRows = [
-            { Metric: "GPU Temp (Avg/Max)", Value: `${v(summary.GpuTjAvg)} / ${v(summary.GpuTjMax)}` },
-            { Metric: "Memory Temp (Avg/Max)", Value: `${v(summary.MemTjAvg)} / ${v(summary.MemTjMax)}` },
-            { Metric: "GPC Clock MHz (Avg/Max)", Value: `${v(summary.GpcClockAvg)} / ${v(summary.GpcClockMax)}` },
-            { Metric: "Power W (Avg/Max)", Value: `${v(summary.PowerAvg)} / ${v(summary.PowerMax)}` },
-            { Metric: "PCIe", Value: `${v(summary.PcieWidth)} / ${v(summary.PcieSpeed)}` },
-            { Metric: "Throttle events", Value: v(summary.ThrottleEvents) }
+            { Metric: "GPU Temp (Min/Avg/Max)", Value: `${v(summary.GpuTjMin)} / ${v(summary.GpuTjAvg)} / ${v(summary.GpuTjMax)}` },
+            { Metric: "Memory Temp (Min/Avg/Max)", Value: `${v(summary.MemTjMin)} / ${v(summary.MemTjAvg)} / ${v(summary.MemTjMax)}` },
+            { Metric: "GPC Clock MHz (Min/Avg/Max)", Value: `${v(summary.GpcClockMin)} / ${v(summary.GpcClockAvg)} / ${v(summary.GpcClockMax)}` },
+            { Metric: "Memory Clock MHz (Min/Avg/Max)", Value: `${v(summary.MemoryClockMin)} / ${v(summary.MemoryClockAvg)} / ${v(summary.MemoryClockMax)}` },
+            { Metric: "Power W (Min/Avg/Max)", Value: `${v(summary.PowerMin)} / ${v(summary.PowerAvg)} / ${v(summary.PowerMax)}` },
+            { Metric: "Capping occurrences", Value: `${v(summary.CappingSamples)} samples / ${v(summary.CappingPeriods)} periods` }
         ];
         y = addTable(pdf, "Key metrics", metricRows, y + 2);
 
-        if (throttle && throttle.length) {
-            y = addTable(pdf, "Throttle breakdown", throttle, y + 4);
+        if (capping && capping.length) {
+            y = addTable(pdf, "Capping activity counts", capping, y + 4);
         }
 
         // Charts page
