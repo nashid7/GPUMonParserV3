@@ -7,7 +7,8 @@
             <span class="brand-name">GPU Monitor</span>
         </div>
         <div class="header-actions">
-            <a href="https://learn.microsoft.com/aspnet/core/" target="_blank">Docs</a>
+            <NavLink href="/productDev/Tools/gpuMonLogParser">Analyze</NavLink>
+            <NavLink href="/productDev/Tools/gpuMonComparison">Compare</NavLink>
         </div>
     </header>
     <main class="app-main">
@@ -29,8 +30,9 @@
     .brand { display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:.4px; color:#fff; }
     .logo-dot { width:12px; height:12px; border-radius:50%; background:linear-gradient(135deg,#38bdf8,#22c55e); box-shadow:0 0 12px rgba(56,189,248,.8); }
     .brand-name { font-size:1.05rem; }
-    .header-actions a { color:#cbd5e1; text-decoration:none; font-size:0.9rem; padding:8px 12px; border:1px solid rgba(255,255,255,0.08); border-radius:6px; transition:all .2s ease; }
+    .header-actions{display:flex;gap:7px}.header-actions a { color:#cbd5e1; text-decoration:none; font-size:0.9rem; padding:8px 12px; border:1px solid rgba(255,255,255,0.08); border-radius:6px; transition:all .2s ease; }
     .header-actions a:hover { color:#fff; border-color:rgba(255,255,255,0.2); }
+    .header-actions a.active{color:#fff;border-color:#3b82f6;background:#17233a}
     .app-main { padding:32px 18px 42px; display:flex; justify-content:center; }
     .content { width: min(1240px, 100%); background:#0c1425; border:1px solid rgba(255,255,255,0.08); border-radius:16px; padding:24px; box-shadow:0 24px 70px rgba(0,0,0,0.4); color:#e2e8f0; }
     #blazor-error-ui { position:fixed; bottom:0; left:0; right:0; background:#1f2937; color:#fff; padding:12px 16px; }

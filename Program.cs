@@ -7,6 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 builder.Services.AddScoped<NotificationService>();
+builder.Services.AddScoped<GpuComparisonParser>();
 
 var app = builder.Build();
 

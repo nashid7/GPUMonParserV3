@@ -12,12 +12,11 @@
 <PageTitle>GPU Monitor Log Parser</PageTitle>
 
 <h3>GPU Monitor Log Parser</h3>
-<p>Upload a GPU Monitor log (.log / .txt / .csv) to extract performance metrics when the GPU is at high utilization.</p>
+<p>Upload a GPU Monitor CSV file to analyze performance metrics.</p>
 
 <div class="panel upload-panel">
     <div class="upload-actions">
-        <InputFile OnChange="OnFileSelected" accept=".log,.txt,.csv" />
-        <button class="btn btn-secondary btn-sm" @onclick="LoadSampleAsync">Load sample</button>
+        <InputFile OnChange="OnFileSelected" accept=".csv,text/csv" />
     </div>
     <div class="small-gap"></div>
     <div class="row-controls">
@@ -44,7 +43,7 @@
             </div>
             <div class="actions">
                 <CopyToClipboard GetTextAsync="GetSummaryClipboardAsync" Tooltip="Copy summary" CopiedTooltip="Summary copied" />
-                <button class="btn btn-secondary btn-sm" @onclick="ExportPdfAsync" disabled="@(!ParseComplete)">Export PDF</button>
+                <button class="btn btn-secondary btn-sm" @onclick="ExportPdfAsync" disabled="@(!ParseComplete || _isExporting)">@(_isExporting ? "Building PDF..." : "Export PDF")</button>
             </div>
         </div>
 
@@ -118,6 +117,7 @@
                         <p class="muted">Visualize filtered samples (util @UtilRangeDisplay). Click a chart to expand.</p>
                     </div>
                 </div>
+                <div id="main-chart-sync-readout" class="chart-sync-readout" aria-live="polite"></div>
                 <div class="chart-grid">
                     <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-gpu"))">
                         <div class="chart-title">
@@ -132,6 +132,27 @@
                             <span class="expand">Expand</span>
                         </div>
                         <div class="chart-frame"><canvas id="chart-power"></canvas></div>
+                    </div>
+                    <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-memory"))">
+                        <div class="chart-title">
+                            <p class="eyebrow">Memory Temp (C)</p>
+                            <span class="expand">Expand</span>
+                        </div>
+                        <div class="chart-frame"><canvas id="chart-memory"></canvas></div>
+                    </div>
+                    <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-gpc-clock"))">
+                        <div class="chart-title">
+                            <p class="eyebrow">GPC Clock (MHz)</p>
+                            <span class="expand">Expand</span>
+                        </div>
+                        <div class="chart-frame"><canvas id="chart-gpc-clock"></canvas></div>
+                    </div>
+                    <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-memory-clock"))">
+                        <div class="chart-title">
+                            <p class="eyebrow">Memory Clock (MHz)</p>
+                            <span class="expand">Expand</span>
+                        </div>
+                        <div class="chart-frame"><canvas id="chart-memory-clock"></canvas></div>
                     </div>
                     <div class="chart-card" @onclick="@(() => OpenChartModalAsync("chart-scatter"))">
                         <div class="chart-title">
@@ -279,6 +300,11 @@
     button.btn { border-radius:8px; }
     .chart-title{display:flex; justify-content:space-between; align-items:center;}
     .chart-title .expand{font-size:0.75rem; color:#93c5fd;}
+    .chart-sync-readout{display:none; align-items:center; gap:12px; min-height:42px; margin:0 0 12px; padding:9px 12px; border:1px solid #2b4266; border-radius:10px; background:#0a1425; color:#e2e8f0; box-shadow:inset 0 1px 0 rgba(255,255,255,.025);}
+    .chart-sync-readout.show{display:flex;}
+    .chart-sync-readout>strong{flex:0 0 auto; color:#f8fafc; font-size:.82rem;}
+    .sync-values{display:flex; flex-wrap:wrap; gap:6px;}
+    .sync-values span{padding:4px 7px; border:1px solid color-mix(in srgb,var(--sync-color) 65%,#334155); border-radius:999px; color:#dbeafe; background:color-mix(in srgb,var(--sync-color) 12%,#0f172a); font-size:.7rem; white-space:nowrap;}
     .event-card{overflow:hidden;}
     .event-card .eyebrow{color:#7dd3fc; font-weight:700; letter-spacing:.08em;}
     .event-card h5{margin:3px 0 5px; color:#f8fafc; font-size:1.16rem; font-weight:650; line-height:1.25;}
@@ -310,9 +336,9 @@
     .pointer-badges{display:flex; flex-wrap:wrap; gap:4px;}
     .pointer-badge{padding:2px 6px; border:1px solid currentColor; border-radius:999px; font-size:.68rem; font-weight:700; text-transform:uppercase; background:rgba(15,23,42,.9);}
     .pointer-overlap{font-size:.66rem; color:#fbbf24;}
-    .chart-modal{position:fixed; inset:0; background:rgba(6,10,18,0.76); backdrop-filter: blur(5px); display:flex; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition:opacity .2s ease;}
+    .chart-modal{position:fixed; inset:0; z-index:100; padding:clamp(10px,2vw,28px); box-sizing:border-box; background:rgba(6,10,18,0.82); backdrop-filter:blur(6px); display:flex; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition:opacity .2s ease;}
     .chart-modal.show{opacity:1; pointer-events:auto;}
-    .chart-modal-body{background:#0b1324; border:1px solid #1f2d4a; border-radius:12px; padding:14px; width: min(90vw, 1100px); height:min(85vh, 700px); display:flex; flex-direction:column; box-shadow:0 30px 80px rgba(0,0,0,0.55);}
+    .chart-modal-body{box-sizing:border-box; background:#0b1324; border:1px solid #29405f; border-radius:12px; padding:14px; width:min(96vw,2200px); height:92vh; display:flex; flex-direction:column; box-shadow:0 30px 80px rgba(0,0,0,0.6);}
     .chart-modal-header{display:flex; justify-content:space-between; align-items:center; color:#e5e7eb; margin-bottom:8px;}
     .chart-modal-frame{position:relative; flex:1; background:#0a1120; border:1px solid #1f2d4a; border-radius:10px; padding:10px;}
     .chart-modal-frame canvas{width:100%!important; height:100%!important;}
@@ -356,7 +382,11 @@
     private string DriverVersionDisplay { get; set; } = "n/a";
     private int? _maxUtil;
     private TimeSpan Duration { get; set; }
-    private string DurationDisplay => Duration == TimeSpan.Zero ? "" : Duration.ToString();
+    private string DurationDisplay => Duration == TimeSpan.Zero
+        ? ""
+        : Duration.TotalHours >= 1
+            ? Duration.ToString(@"h\:mm\:ss")
+            : Duration.ToString(@"m\:ss");
     private string CoverageDisplay => TotalSampleCount == 0 ? "--" : $"{(HighUtilSampleCount * 100m / TotalSampleCount):0.0}%";
     private int CappingSampleTotal => CappingSampleCounts.Values.Sum();
     private string CappingSampleSummary => CappingSampleTotal == 0
@@ -375,8 +405,9 @@
     private bool ShowChartModal { get; set; }
     private string? _modalSourceId;
     private bool _chartsDirty;
+    private bool _isExporting;
 
-    private record SamplePoint(int Index, decimal? GpuTj, decimal? MemTj, decimal? PowerW, int? Util, DateTime? Timestamp);
+    private record SamplePoint(int Index, decimal? GpuTj, decimal? MemTj, decimal? PowerW, decimal? GpcClock, decimal? MemoryClock, int? Util, DateTime? Timestamp);
     private record StateSample(int Index, DateTime? Timestamp, string PState, string CappingReason);
     private record TimelineSegment(string Label, double StartSeconds, double EndSeconds, string StartTime, string EndTime, double DurationSeconds);
     private record CsvMetricSpec(string Key, bool PreferPopulated, params string[] Aliases);
@@ -713,9 +744,9 @@
         FilteredLines.Clear();
 
         var ext = Path.GetExtension(_file.Name).ToLowerInvariant();
-        if (ext is not ".log" and not ".txt" and not ".csv")
+        if (ext is not ".csv")
         {
-            UploadError = "Invalid file type";
+            UploadError = "Please upload a .csv file.";
             _file = null;
         }
         return Task.CompletedTask;
@@ -959,7 +990,7 @@ date,time,1:gpc_util,1:t_gpu,1:mem_temp,1:gpc_clock,1:memory_clock,1:pwr_tgp,1:p
         }
 
                 int? utilInt = gpcUtilDec.HasValue ? (int?)Math.Round(gpcUtilDec.Value) : null;
-                FilteredSamples.Add(new SamplePoint(FilteredSamples.Count, gpuTj, memTj, gtpW, utilInt, ts));
+                FilteredSamples.Add(new SamplePoint(FilteredSamples.Count, gpuTj, memTj, gtpW, gpcClock, memoryClock, utilInt, ts));
                 HighUtilSampleCount++;
                 FilteredLines.Add(raw);
             }
@@ -1006,7 +1037,7 @@ date,time,1:gpc_util,1:t_gpu,1:mem_temp,1:gpc_clock,1:memory_clock,1:pwr_tgp,1:p
             if (decimal.TryParse(m.Groups["mem"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var memTj)) memTjList.Add(memTj);
             if (decimal.TryParse(m.Groups["gpcClock"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var gpcClock)) gpcClockList.Add(gpcClock);
             if (decimal.TryParse(m.Groups["gtp"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var gtpMw)) gtpList.Add(gtpMw / 1000m);
-            FilteredSamples.Add(new SamplePoint(FilteredSamples.Count, gpuTj, memTj, gtpMw / 1000m, gpcUtil, ts));
+            FilteredSamples.Add(new SamplePoint(FilteredSamples.Count, gpuTj, memTj, gtpMw / 1000m, gpcClock, null, gpcUtil, ts));
             HighUtilSampleCount++;
             FilteredLines.Add(raw);
         }
@@ -1106,13 +1137,23 @@ date,time,1:gpc_util,1:t_gpu,1:mem_temp,1:gpc_clock,1:memory_clock,1:pwr_tgp,1:p
             {
                 var labels = FilteredSamples.Select(s => s.Timestamp?.ToString("HH:mm:ss") ?? $"#{s.Index + 1}").ToArray();
                 var gpu = FilteredSamples.Select(s => s.GpuTj).ToArray();
+                var memory = FilteredSamples.Select(s => s.MemTj).ToArray();
                 var power = FilteredSamples.Select(s => s.PowerW).ToArray();
+                var gpcClock = FilteredSamples.Select(s => s.GpcClock).ToArray();
+                var memoryClock = FilteredSamples.Select(s => s.MemoryClock).ToArray();
                 var scatter = FilteredSamples.Where(s => s.PowerW.HasValue && s.GpuTj.HasValue)
                     .Select(s => new { x = s.PowerW, y = s.GpuTj }).ToArray();
 
                 await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-gpu", labels, gpu, "GPU Temp (C)", "#3b82f6");
+                await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-memory", labels, memory, "Memory Temp (C)", "#f97316");
                 await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-power", labels, power, "Power (W)", "#22c55e");
+                await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-gpc-clock", labels, gpcClock, "GPC Clock (MHz)", "#06b6d4");
+                await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-memory-clock", labels, memoryClock, "Memory Clock (MHz)", "#eab308");
                 await JS.InvokeVoidAsync("gpuCharts.renderScatter", "chart-scatter", scatter, "Power (W)", "GPU Temp (C)", "#a855f7");
+                await JS.InvokeVoidAsync("gpuCharts.createMainSyncGroup",
+                    "main-performance",
+                    new[] { "chart-gpu", "chart-memory", "chart-power", "chart-gpc-clock", "chart-memory-clock" },
+                    "main-chart-sync-readout");
             }
 
             if (PStateTimeline.Any())
@@ -1172,14 +1213,18 @@ date,time,1:gpc_util,1:t_gpu,1:mem_temp,1:gpc_clock,1:memory_clock,1:pwr_tgp,1:p
 
     private async Task ExportPdfAsync()
     {
+        if (_isExporting) return;
+        _isExporting = true;
         try
         {
-            var summary = new
+            var report = new
             {
+                SourceFile = _file?.Name ?? "Built-in sample",
                 Date = TestDate?.ToString("yyyy-MM-dd") ?? "",
                 Duration = DurationDisplay,
                 Coverage = CoverageDisplay,
-                Rows = $"{HighUtilSampleCount}/{TotalSampleCount}",
+                MatchingRows = HighUtilSampleCount,
+                TotalRows = TotalSampleCount,
                 Filter = UtilRangeDisplay,
                 GpuTjMin = Fmt(GpuTjMin),
                 GpuTjAvg = Fmt(GpuTjAvg),
@@ -1202,8 +1247,20 @@ date,time,1:gpc_util,1:t_gpu,1:mem_temp,1:gpc_clock,1:memory_clock,1:pwr_tgp,1:p
                 UtilColumn = UtilColumnDisplay,
                 PowerColumn = PowerColumnDisplay,
                 CappingSamples = CappingSampleTotal,
-                CappingPeriods = CappingEventCounts.Values.Sum()
+                CappingPeriods = CappingEventCounts.Values.Sum(),
+                PStateSamples = PStateSampleCounts.Values.Sum(),
+                PStatePeriods = PStateEventCounts.Values.Sum()
             };
+
+            var pStates = PStateSampleCounts
+                .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => new
+                {
+                    State = kv.Key,
+                    Samples = kv.Value,
+                    Periods = PStateEventCounts.GetValueOrDefault(kv.Key)
+                })
+                .ToList();
 
             var capping = CappingSampleCounts
                 .OrderBy(kv => CappingReasonOrder(kv.Key))
@@ -1215,17 +1272,21 @@ date,time,1:gpc_util,1:t_gpu,1:mem_temp,1:gpc_clock,1:memory_clock,1:pwr_tgp,1:p
                     Periods = CappingEventCounts.GetValueOrDefault(kv.Key)
                 })
                 .ToList();
-            var filtered = FilteredLines.Take(50).ToList();
 
             await JS.InvokeVoidAsync("gpuExport.exportEngineeringPdf",
-                summary,
+                report,
+                pStates,
                 capping,
-                filtered,
                 $"gpu-log-report-{DateTime.Now:yyyyMMddHHmmss}.pdf");
+            NotificationService.NotifySuccess("PDF report generated.");
         }
         catch (Exception ex)
         {
             NotificationService.NotifyError($"PDF export failed: {ex.Message}");
+        }
+        finally
+        {
+            _isExporting = false;
         }
     }
 }

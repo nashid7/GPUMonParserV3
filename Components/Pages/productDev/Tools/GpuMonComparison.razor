@@ -1,0 +1,252 @@
+@page "/productDev/Tools/gpuMonComparison"
+@using System.Text
+@using par.Services
+@inject GpuComparisonParser ComparisonParser
+@inject IJSRuntime JS
+@rendermode InteractiveServer
+
+<PageTitle>GPU Log Comparison</PageTitle>
+
+<div class="compare-heading">
+    <div>
+        <p class="eyebrow">Multi-run analysis</p>
+        <h3>Performance comparison</h3>
+        <p class="muted">Upload two to four GPU Monitor CSV files and compare their performance over the same elapsed timeline.</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/productDev/Tools/gpuMonLogParser">Single-run analysis</a>
+</div>
+
+<section class="compare-panel">
+    <div class="compare-controls">
+        <div class="utilization-setting">
+            <label>Shared utilization range</label>
+            <input type="number" min="0" max="100" @bind="_utilizationMin" />
+            <span>to</span>
+            <input type="number" min="0" max="100" @bind="_utilizationMax" />
+        </div>
+        @if (_runs.Count < 4)
+        {
+            <button class="btn btn-outline-secondary btn-sm add-run-button" @onclick="AddRun">+ Add another run</button>
+        }
+    </div>
+
+    <div class="run-upload-grid">
+        @for (var index = 0; index < _runs.Count; index++)
+        {
+            var slotIndex = index;
+            var slot = _runs[index];
+            <div class="run-upload-card" style="@($"--run-color:{RunColors[index]}")" @key="slot.Id">
+                <div class="run-card-head">
+                    <input class="run-name" @bind="slot.Name" aria-label="Run name" />
+                    @if (_runs.Count > 2)
+                    {
+                        <button class="remove-run" title="Remove run" @onclick="(() => RemoveRun(slotIndex))">×</button>
+                    }
+                </div>
+                <InputFile OnChange="@(args => SelectFileAsync(slotIndex, args))" accept=".csv,text/csv" />
+                <div class="file-state @(slot.Content is not null ? "ready" : "")">@(slot.FileName ?? "Upload a GPU Monitor CSV")</div>
+                @if (!string.IsNullOrWhiteSpace(slot.Error))
+                {
+                    <div class="run-error">@slot.Error</div>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="compare-submit-row">
+        <div class="compare-readiness" aria-live="polite">
+            @if (ReadyRunCount >= 2)
+            {
+                <strong>Ready to compare</strong>
+                <span>@ReadyRunCount CSV @(ReadyRunCount == 1 ? "file" : "files") selected</span>
+            }
+            else
+            {
+                <strong>Select at least two CSV files</strong>
+                <span>@ReadyRunCount of 2 required files selected</span>
+            }
+        </div>
+        <button class="btn btn-primary compare-submit-button" @onclick="CompareAsync" disabled="@(_isComparing || ReadyRunCount < 2)">
+            @(_isComparing ? "Comparing..." : ReadyRunCount >= 2 ? $"Compare {ReadyRunCount} runs" : "Compare selected runs")
+        </button>
+    </div>
+</section>
+
+@if (_results.Count >= 2)
+{
+    <section class="compare-panel results">
+        <div class="section-head">
+            <div>
+                <p class="eyebrow">Comparison summary</p>
+                <h4>Performance overview</h4>
+                <p class="muted">Each row compares the same metric across every run. Average is emphasized; all values use the shared @_normalizedRange utilization range.</p>
+            </div>
+        </div>
+
+        <div class="comparison-table-wrap">
+            <table class="comparison-table">
+                <thead>
+                    <tr>
+                        <th class="metric-column">Metric</th>
+                        @for (var index = 0; index < _results.Count; index++)
+                        {
+                            var result = _results[index];
+                            <th>
+                                <span class="run-key" style="@($"--run-color:{RunColors[index]}")">@result.Name</span>
+                                <span class="run-file">@result.SourceFile</span>
+                            </th>
+                        }
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var definition in ComparisonMetrics)
+                    {
+                        <tr>
+                            <th scope="row" class="metric-name"><strong>@definition.Label</strong><span>@definition.Unit</span></th>
+                            @foreach (var result in _results)
+                            {
+                                var metric = definition.Select(result);
+                                <td>
+                                    <div class="metric-value-grid">
+                                        <div><span>Min</span><strong>@Fmt(metric.Minimum)</strong></div>
+                                        <div class="average"><span>Average</span><strong>@Fmt(metric.Average)</strong></div>
+                                        <div><span>Max</span><strong>@Fmt(metric.Maximum)</strong></div>
+                                    </div>
+                                </td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <div class="comparison-chart-card">
+            <div><p class="eyebrow">GPU temperature</p><span>Filtered samples aligned by elapsed test time</span></div>
+            <div class="comparison-chart-frame"><canvas id="comparison-gpu-temperature"></canvas></div>
+        </div>
+        <div class="comparison-chart-card">
+            <div><p class="eyebrow">Memory temperature</p><span>Filtered samples aligned by elapsed test time</span></div>
+            <div class="comparison-chart-frame"><canvas id="comparison-memory-temperature"></canvas></div>
+        </div>
+        <div class="comparison-chart-card">
+            <div><p class="eyebrow">Power</p><span>Filtered samples aligned by elapsed test time</span></div>
+            <div class="comparison-chart-frame"><canvas id="comparison-power"></canvas></div>
+        </div>
+        <div class="comparison-chart-card">
+            <div><p class="eyebrow">GPC clock</p><span>Filtered samples aligned by elapsed test time</span></div>
+            <div class="comparison-chart-frame"><canvas id="comparison-gpc-clock"></canvas></div>
+        </div>
+        <div class="comparison-chart-card">
+            <div><p class="eyebrow">Memory clock</p><span>Filtered samples aligned by elapsed test time</span></div>
+            <div class="comparison-chart-frame"><canvas id="comparison-memory-clock"></canvas></div>
+        </div>
+        <div class="comparison-chart-card">
+            <div><p class="eyebrow">Capping reasons</p><span>Every active reason and overlap across the complete test</span></div>
+            <div class="comparison-chart-frame capping"><canvas id="comparison-capping"></canvas></div>
+        </div>
+    </section>
+}
+
+<style>
+    .compare-heading,.section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}.compare-heading h3,.section-head h4{margin:2px 0 4px;color:#f8fafc}.eyebrow{margin:0;color:#7dd3fc;text-transform:uppercase;font-size:.68rem;font-weight:700;letter-spacing:.08em}.muted{color:#94a3b8}.compare-panel{margin-top:16px;padding:18px;border:1px solid #223252;border-radius:14px;background:linear-gradient(160deg,#0f172a,#0b1526);box-shadow:0 14px 38px rgba(0,0,0,.25)}
+    .compare-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.utilization-setting{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.compare-controls label{font-size:.82rem;color:#cbd5e1}.compare-controls input{width:70px;padding:5px 8px;border:1px solid #334766;border-radius:7px;background:#0a1323;color:#f8fafc}.add-run-button{margin-left:auto}.run-upload-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:15px}.run-upload-card{padding:13px;border:1px solid #263a59;border-top:3px solid var(--run-color);border-radius:10px;background:#101b30}.run-card-head{display:flex;gap:8px;align-items:center;margin-bottom:10px}.run-name{min-width:0;flex:1;border:0;border-bottom:1px solid #334766;background:transparent;color:#fff;font-weight:700;padding:3px}.remove-run{border:0;background:transparent;color:#94a3b8;font-size:1.2rem}.file-state{margin-top:9px;font-size:.72rem;color:#94a3b8;overflow-wrap:anywhere}.file-state.ready{color:#86efac}.run-error{margin-top:7px;color:#fca5a5;font-size:.72rem}.compare-submit-row{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:16px;padding:14px 16px;border:1px solid #2b4162;border-radius:10px;background:#101c31}.compare-readiness strong,.compare-readiness span{display:block}.compare-readiness strong{color:#f8fafc;font-size:.86rem}.compare-readiness span{margin-top:3px;color:#8da0ba;font-size:.7rem}.compare-submit-button{min-width:190px;padding:9px 22px;font-weight:700;box-shadow:0 6px 18px rgba(37,99,235,.25)}.compare-submit-button:not(:disabled){background:#2563eb;border-color:#3b82f6}.compare-submit-button:not(:disabled):hover{background:#1d4ed8}
+    .comparison-table-wrap{overflow:auto;margin:16px 0 18px;border:1px solid #2a4164;border-radius:12px;background:#0a1425}.comparison-table{width:100%;min-width:760px;border-collapse:separate;border-spacing:0;table-layout:fixed}.comparison-table th,.comparison-table td{padding:13px;border-right:1px solid #233653;border-bottom:1px solid #233653}.comparison-table tr>*:last-child{border-right:0}.comparison-table tbody tr:last-child>*{border-bottom:0}.comparison-table thead th{background:#142139;color:#f8fafc;text-align:left;vertical-align:top}.comparison-table .metric-column{width:170px;color:#94a3b8;text-transform:uppercase;font-size:.68rem;letter-spacing:.07em}.run-key{display:flex;align-items:center;gap:7px;font-size:.86rem;font-weight:700}.run-key:before{content:"";flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--run-color);box-shadow:0 0 0 3px color-mix(in srgb,var(--run-color) 18%,transparent)}.run-file{display:block;margin:5px 0 0 16px;color:#8293aa;font-size:.66rem;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.metric-name{background:#101c31;color:#f8fafc;text-align:left}.metric-name strong{display:block;font-size:.8rem}.metric-name span{display:block;margin-top:3px;color:#7dd3fc;font-size:.67rem;font-weight:500}.metric-value-grid{display:grid;grid-template-columns:repeat(3,minmax(58px,1fr));gap:6px}.metric-value-grid>div{min-width:0;padding:7px 6px;border:1px solid #263b5b;border-radius:7px;background:#0d192b;text-align:center}.metric-value-grid span{display:block;margin-bottom:3px;color:#7f90a8;text-transform:uppercase;font-size:.57rem;font-weight:700;letter-spacing:.05em}.metric-value-grid strong{display:block;color:#dbeafe;font-size:.78rem;font-variant-numeric:tabular-nums}.metric-value-grid .average{border-color:#315a86;background:#10243b}.metric-value-grid .average span{color:#7dd3fc}.metric-value-grid .average strong{color:#fff;font-size:.86rem}
+    .comparison-chart-card{margin-top:13px;padding:14px;border:1px solid #263a59;border-radius:12px;background:#0a1425}.comparison-chart-card>div:first-child{display:flex;justify-content:space-between;gap:12px;align-items:center}.comparison-chart-card>div:first-child span{font-size:.7rem;color:#8293aa}.comparison-chart-frame{height:330px;margin-top:9px}.comparison-chart-frame.capping{height:360px}.comparison-chart-frame canvas{width:100%!important;height:100%!important}
+    @@media(max-width:700px){.compare-heading{display:block}.compare-heading>a{margin-top:10px}.add-run-button{margin-left:0}.compare-submit-row{align-items:stretch;flex-direction:column}.compare-submit-button{width:100%}.comparison-chart-card>div:first-child{display:block}.comparison-table{min-width:680px}.comparison-table .metric-column{width:140px}}
+</style>
+
+@code {
+    private static readonly string[] RunColors = ["#3b82f6", "#f97316", "#22c55e", "#a855f7"];
+    private static readonly MetricDefinition[] ComparisonMetrics =
+    [
+        new("GPU temperature", "°C", run => run.GpuTemperature),
+        new("Memory temperature", "°C", run => run.MemoryTemperature),
+        new("Power", "W", run => run.Power),
+        new("GPC clock", "MHz", run => run.GpcClock),
+        new("Memory clock", "MHz", run => run.MemoryClock),
+    ];
+    private readonly List<RunSlot> _runs = [new("Run A"), new("Run B")];
+    private List<ComparisonRunResult> _results = [];
+    private int _utilizationMin = 99;
+    private int _utilizationMax = 100;
+    private bool _isComparing;
+    private bool _chartsDirty;
+    private int ReadyRunCount => _runs.Count(run => run.Content is not null);
+    private string _normalizedRange => $"{Math.Clamp(Math.Min(_utilizationMin, _utilizationMax), 0, 100)}-{Math.Clamp(Math.Max(_utilizationMin, _utilizationMax), 0, 100)}%";
+
+    private sealed class RunSlot(string name)
+    {
+        public Guid Id { get; } = Guid.NewGuid();
+        public string Name { get; set; } = name;
+        public string? FileName { get; set; }
+        public string? Content { get; set; }
+        public string? Error { get; set; }
+    }
+
+    private sealed record MetricDefinition(string Label, string Unit, Func<ComparisonRunResult, ComparisonMetric> Select);
+
+    private void AddRun() => _runs.Add(new($"Run {(char)('A' + _runs.Count)}"));
+    private void RemoveRun(int index) { if (_runs.Count > 2) { _runs.RemoveAt(index); _results = []; } }
+
+    private async Task SelectFileAsync(int index, InputFileChangeEventArgs args)
+    {
+        var slot = _runs[index];
+        try
+        {
+            var file = args.File;
+            if (!Path.GetExtension(file.Name).Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Please upload a .csv file.");
+            using var stream = file.OpenReadStream(50 * 1024 * 1024);
+            using var reader = new StreamReader(stream, Encoding.UTF8, true);
+            slot.Content = await reader.ReadToEndAsync();
+            slot.FileName = file.Name;
+            slot.Error = null;
+        }
+        catch (Exception exception)
+        {
+            slot.Content = null;
+            slot.Error = exception.Message;
+        }
+    }
+
+    private Task CompareAsync()
+    {
+        _isComparing = true;
+        var parsed = new List<ComparisonRunResult>();
+        foreach (var slot in _runs.Where(run => run.Content is not null))
+        {
+            try
+            {
+                slot.Error = null;
+                parsed.Add(ComparisonParser.Parse(slot.Content!, slot.FileName ?? slot.Name, slot.Name, _utilizationMin, _utilizationMax));
+            }
+            catch (Exception exception)
+            {
+                slot.Error = exception.Message;
+            }
+        }
+        _results = parsed.Count >= 2 ? parsed : [];
+        _chartsDirty = _results.Count >= 2;
+        _isComparing = false;
+        return Task.CompletedTask;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_chartsDirty)
+        {
+            _chartsDirty = false;
+            var payload = _results.Select((run, index) => new
+            {
+                run.Name,
+                Color = RunColors[index],
+                Samples = run.Samples,
+                CappingSegments = run.CappingSegments
+            }).ToArray();
+            await JS.InvokeVoidAsync("gpuCharts.renderComparison", new object?[] { payload });
+        }
+        await base.OnAfterRenderAsync(firstRender);
+    }
+
+    private static string Fmt(decimal? value) => value?.ToString("0.##") ?? "-";
+}

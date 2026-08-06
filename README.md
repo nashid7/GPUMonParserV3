@@ -1,15 +1,30 @@
-<img width="741" height="817" alt="image" src="https://github.corp.wolf.ca/user-attachments/assets/94fadc5e-9505-4787-b4f2-e9f3004b8723" />
+# GPU Monitor Log Parser
 
-Lightweight internal tool to parse NVIDIA GPUMON logs (legacy and new formats), filter on GPU utilization, visualize temps/power, and export an engineering PDF.
+A .NET 9 Blazor application for analyzing NVIDIA GPU Monitor CSV exports.
 
 ## Features
-- Upload `.csv/.log/.txt` GPUMON outputs.
-- Supports multiple GPUMON header variants across old and new log versions.
-- Dynamic utilization range filtering.
-- Metrics for GPU temperature, memory temperature, power, GPC clock, memory clock, P-State activity, and capping activity.
-- Charts for GPU temp, power, and power vs GPU temp with expandable modal view.
-  
 
-Live test deployment:
-- https://gpumonparserv3.onrender.com/productDev/Tools/gpuMonLogParser
+- Configurable GPU-utilization filtering.
+- Min, average, and max values for GPU temperature, memory temperature, power, GPC clock, and memory clock.
+- GPU metadata including brand, VBIOS, and driver versions.
+- P-State and capping-reason activity timelines.
+- Synchronized performance charts with expandable, wheel-zoomable views.
+- Comparison of two to four runs on a shared elapsed-time scale.
+- Multi-run tooltips and a structured performance comparison matrix.
+- Engineering PDF export.
+
+## Run locally
+
+```bash
+dotnet restore
+dotnet run
+```
+
+Open `http://localhost:5200/productDev/Tools/gpuMonLogParser`.
+
+## Deployment
+
+The included multi-stage `Dockerfile` publishes the application with the .NET 9 SDK and runs it on the .NET 9 ASP.NET runtime. It is configured to listen on port `10000` for Render.
+
+Live deployment: https://gpumonparserv3.onrender.com/productDev/Tools/gpuMonLogParser
 

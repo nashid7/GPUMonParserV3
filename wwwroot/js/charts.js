@@ -2,6 +2,8 @@ window.gpuCharts = (() => {
     const instances = {};
     const cache = {};
     const timelineStates = {};
+    const expandedZoomStates = {};
+    const syncGroups = {};
 
     const ensureChartJs = () => {
         if (typeof Chart === "undefined") {
@@ -12,6 +14,11 @@ window.gpuCharts = (() => {
     };
 
     const destroy = (id) => {
+        const expandedState = expandedZoomStates[id];
+        if (expandedState?.canvas && expandedState.wheel) {
+            expandedState.canvas.removeEventListener("wheel", expandedState.wheel);
+            delete expandedZoomStates[id];
+        }
         const state = timelineStates[id];
         if (state?.canvas && state.handlers) {
             state.canvas.removeEventListener("wheel", state.handlers.wheel);
@@ -341,7 +348,227 @@ window.gpuCharts = (() => {
                     y: { beginAtZero: false },
                 },
             },
+            plugins: [syncCursorPlugin],
         });
+    };
+
+    const syncCursorPlugin = {
+        id: "syncCursor",
+        afterDatasetsDraw(chart) {
+            const cursor = chart.$syncCursor;
+            if (!cursor) return;
+            const x = chart.scales.x.getPixelForValue(cursor.value);
+            if (!Number.isFinite(x) || x < chart.chartArea.left || x > chart.chartArea.right) return;
+            const context = chart.ctx;
+            context.save();
+            context.beginPath();
+            context.moveTo(x, chart.chartArea.top);
+            context.lineTo(x, chart.chartArea.bottom);
+            context.lineWidth = 1.2;
+            context.strokeStyle = "rgba(226,232,240,.9)";
+            context.setLineDash([4, 3]);
+            context.stroke();
+            context.setLineDash([]);
+            if (chart.config.type === "bar") {
+                context.restore();
+                return;
+            }
+            const tooltipRows = [];
+            chart.data.datasets.forEach((dataset, datasetIndex) => {
+                const meta = chart.getDatasetMeta(datasetIndex);
+                if (meta.hidden || !meta.data?.length) return;
+                let pointIndex = cursor.value;
+                if (cursor.mode === "value") {
+                    let bestDistance = Number.POSITIVE_INFINITY;
+                    pointIndex = -1;
+                    (dataset.data || []).forEach((point, index) => {
+                        const distance = Math.abs(Number(point?.x) - cursor.value);
+                        if (Number.isFinite(distance) && distance < bestDistance) {
+                            bestDistance = distance;
+                            pointIndex = index;
+                        }
+                    });
+                }
+                const element = meta.data[pointIndex];
+                if (!element || !Number.isFinite(element.x) || !Number.isFinite(element.y)) return;
+                context.beginPath();
+                context.arc(element.x, element.y, 4, 0, Math.PI * 2);
+                context.fillStyle = dataset.borderColor || dataset.backgroundColor || "#38bdf8";
+                context.fill();
+                context.lineWidth = 1.5;
+                context.strokeStyle = "#f8fafc";
+                context.stroke();
+                const rawValue = dataset.data?.[pointIndex]?.y;
+                const numericValue = Number(rawValue);
+                tooltipRows.push({
+                    label: dataset.label || `Run ${datasetIndex + 1}`,
+                    value: Number.isFinite(numericValue)
+                        ? numericValue.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                        : "-",
+                    color: dataset.borderColor || dataset.backgroundColor || "#38bdf8",
+                    y: element.y,
+                });
+            });
+            if (chart.$syncTooltip && tooltipRows.length) {
+                const title = cursor.mode === "value"
+                    ? `Elapsed ${formatElapsed(cursor.value)}`
+                    : chart.data.labels?.[cursor.value] || `Sample ${cursor.value + 1}`;
+                context.font = "600 12px system-ui, sans-serif";
+                const rowWidths = tooltipRows.map(row => context.measureText(`${row.label}: ${row.value}`).width + 28);
+                const width = Math.max(128, context.measureText(title).width + 20, ...rowWidths);
+                const height = 31 + tooltipRows.length * 21;
+                const averageY = tooltipRows.reduce((sum, row) => sum + row.y, 0) / tooltipRows.length;
+                let left = x + 12;
+                if (left + width > chart.chartArea.right - 4) left = x - width - 12;
+                left = Math.max(chart.chartArea.left + 4, Math.min(chart.chartArea.right - width - 4, left));
+                const top = Math.max(chart.chartArea.top + 4, Math.min(chart.chartArea.bottom - height - 4, averageY - height / 2));
+                context.fillStyle = "rgba(5,12,24,.96)";
+                context.strokeStyle = "#3b526f";
+                context.lineWidth = 1;
+                context.fillRect(left, top, width, height);
+                context.strokeRect(left + .5, top + .5, width - 1, height - 1);
+                context.fillStyle = "#f8fafc";
+                context.fillText(title, left + 10, top + 19);
+                context.font = "600 12px system-ui, sans-serif";
+                tooltipRows.forEach((row, index) => {
+                    const rowY = top + 39 + index * 21;
+                    context.fillStyle = row.color;
+                    context.fillRect(left + 10, rowY - 9, 9, 9);
+                    context.fillStyle = "#e2e8f0";
+                    context.fillText(`${row.label}: ${row.value}`, left + 26, rowY);
+                });
+            }
+            context.restore();
+        },
+    };
+
+    const clearSyncGroup = groupId => {
+        const group = syncGroups[groupId];
+        if (!group) return;
+        group.members.forEach(member => {
+            member.canvas.removeEventListener("pointermove", member.move);
+            member.canvas.removeEventListener("pointerleave", member.leave);
+            if (member.chart) {
+                member.chart.$syncCursor = null;
+                member.chart.draw();
+            }
+        });
+        group.readout?.classList.remove("show");
+        delete syncGroups[groupId];
+    };
+
+    const updateMainSyncReadout = (readout, charts, index) => {
+        if (!readout) return;
+        readout.replaceChildren();
+        const heading = document.createElement("strong");
+        heading.textContent = charts[0]?.data?.labels?.[index] || `Sample ${index + 1}`;
+        readout.appendChild(heading);
+        const values = document.createElement("div");
+        values.className = "sync-values";
+        charts.forEach(chart => {
+            const dataset = chart.data.datasets[0];
+            const numeric = Number(dataset?.data?.[index]);
+            const chip = document.createElement("span");
+            chip.style.setProperty("--sync-color", dataset?.borderColor || "#38bdf8");
+            chip.textContent = `${dataset?.label || "Metric"}: ${Number.isFinite(numeric) ? numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-"}`;
+            values.appendChild(chip);
+        });
+        readout.appendChild(values);
+        readout.classList.add("show");
+    };
+
+    const createMainSyncGroup = (groupId, chartIds, readoutId) => {
+        clearSyncGroup(groupId);
+        const charts = chartIds.map(id => instances[id]).filter(Boolean);
+        const readout = document.getElementById(readoutId);
+        if (charts.length < 2) return;
+        const members = charts.map(chart => {
+            const canvas = chart.canvas;
+            const move = event => {
+                const rect = canvas.getBoundingClientRect();
+                const pixel = Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, event.clientX - rect.left));
+                const index = Math.max(0, Math.min(chart.data.labels.length - 1, Math.round(chart.scales.x.getValueForPixel(pixel))));
+                charts.forEach(item => { item.$syncCursor = { mode: "index", value: index }; item.draw(); });
+                updateMainSyncReadout(readout, charts, index);
+            };
+            const leave = () => {
+                charts.forEach(item => { item.$syncCursor = null; item.draw(); });
+                readout?.classList.remove("show");
+            };
+            canvas.addEventListener("pointermove", move);
+            canvas.addEventListener("pointerleave", leave);
+            return { chart, canvas, move, leave };
+        });
+        syncGroups[groupId] = { members, readout };
+    };
+
+    const clampZoomWindow = (requestedMin, requestedMax, fullMin, fullMax, minimumWidth) => {
+        const fullWidth = fullMax - fullMin;
+        if (!Number.isFinite(fullWidth) || fullWidth <= 0)
+            return { min: fullMin, max: fullMax };
+        const width = Math.max(Math.min(minimumWidth, fullWidth), Math.min(requestedMax - requestedMin, fullWidth));
+        const min = Math.max(fullMin, Math.min(requestedMin, fullMax - width));
+        return { min, max: min + width };
+    };
+
+    const attachExpandedZoom = (id, kind) => {
+        const chart = instances[id];
+        const canvas = chart?.canvas;
+        const xScale = chart?.scales?.x;
+        if (!chart || !canvas || !xScale) return;
+
+        const fullX = { min: Number(xScale.min), max: Number(xScale.max) };
+        const yScale = chart.scales.y;
+        const fullY = yScale ? { min: Number(yScale.min), max: Number(yScale.max) } : null;
+        const minimumXWidth = kind === "line"
+            ? Math.min(2, Math.max(1, fullX.max - fullX.min))
+            : Math.max((fullX.max - fullX.min) * 0.01, Number.EPSILON);
+        const minimumYWidth = fullY
+            ? Math.max((fullY.max - fullY.min) * 0.01, Number.EPSILON)
+            : 0;
+
+        const wheel = event => {
+            event.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const pointerX = Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, event.clientX - rect.left));
+            const pointerY = Math.max(chart.chartArea.top, Math.min(chart.chartArea.bottom, event.clientY - rect.top));
+            const centerX = chart.scales.x.getValueForPixel(pointerX);
+            const currentX = {
+                min: Number(chart.options.scales.x.min ?? chart.scales.x.min),
+                max: Number(chart.options.scales.x.max ?? chart.scales.x.max),
+            };
+            const factor = event.deltaY < 0 ? 0.72 : 1.4;
+            const nextX = clampZoomWindow(
+                centerX - (centerX - currentX.min) * factor,
+                centerX + (currentX.max - centerX) * factor,
+                fullX.min,
+                fullX.max,
+                minimumXWidth);
+            chart.options.scales.x.min = nextX.min;
+            chart.options.scales.x.max = nextX.max;
+
+            if (kind === "scatter" && fullY && chart.scales.y) {
+                const centerY = chart.scales.y.getValueForPixel(pointerY);
+                const currentY = {
+                    min: Number(chart.options.scales.y.min ?? chart.scales.y.min),
+                    max: Number(chart.options.scales.y.max ?? chart.scales.y.max),
+                };
+                const nextY = clampZoomWindow(
+                    centerY - (centerY - currentY.min) * factor,
+                    centerY + (currentY.max - centerY) * factor,
+                    fullY.min,
+                    fullY.max,
+                    minimumYWidth);
+                chart.options.scales.y.min = nextY.min;
+                chart.options.scales.y.max = nextY.max;
+            }
+
+            chart.update("none");
+        };
+
+        expandedZoomStates[id] = { canvas, wheel };
+        canvas.addEventListener("wheel", wheel, { passive: false });
+        canvas.style.cursor = "crosshair";
     };
 
     const openModalFrom = (modalCanvasId, sourceId) => {
@@ -360,6 +587,8 @@ window.gpuCharts = (() => {
             }
             if (instances[modalCanvasId]) {
                 instances[modalCanvasId].resize();
+                if (cached.kind === "line" || cached.kind === "scatter")
+                    attachExpandedZoom(modalCanvasId, cached.kind);
             }
         };
         requestAnimationFrame(() => requestAnimationFrame(render));
@@ -518,5 +747,328 @@ window.gpuCharts = (() => {
         setTimelineCursor(state, 0);
     };
 
-    return { renderLine, renderScatter, renderTimeline, timelineCommand, destroy, openModalFrom };
+    const reportBackgroundPlugin = {
+        id: "reportBackground",
+        beforeDraw(chart) {
+            const { ctx: chartContext, width, height } = chart;
+            chartContext.save();
+            chartContext.globalCompositeOperation = "destination-over";
+            chartContext.fillStyle = "#ffffff";
+            chartContext.fillRect(0, 0, width, height);
+            chartContext.restore();
+        },
+    };
+
+    const reportScaleStyle = (title, beginAtZero = false) => ({
+        beginAtZero,
+        title: title ? {
+            display: true,
+            text: title,
+            color: "#334155",
+            font: { size: 21, weight: "600" },
+            padding: { top: 10 },
+        } : undefined,
+        ticks: {
+            color: "#475569",
+            font: { size: 18 },
+            padding: 9,
+            maxRotation: 35,
+            minRotation: 0,
+        },
+        grid: { color: "rgba(148,163,184,0.28)", lineWidth: 1.2 },
+        border: { color: "#94a3b8" },
+    });
+
+    const exportImage = (sourceId, requestedWidth = 1800, requestedHeight = 620) => {
+        if (!ensureChartJs()) return null;
+        const source = cache[sourceId];
+        if (!source) return null;
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(800, Number(requestedWidth) || 1800);
+        canvas.height = Math.max(400, Number(requestedHeight) || 620);
+
+        let config;
+        if (source.kind === "line") {
+            config = {
+                type: "line",
+                data: {
+                    labels: source.labels,
+                    datasets: [{
+                        label: source.label || "Series",
+                        data: source.data,
+                        borderColor: source.color || "#3b82f6",
+                        backgroundColor: source.color || "#3b82f6",
+                        borderWidth: 4,
+                        pointRadius: 1.6,
+                        pointHoverRadius: 3,
+                        tension: 0.18,
+                        fill: false,
+                    }],
+                },
+                options: {
+                    responsive: false,
+                    animation: false,
+                    devicePixelRatio: 1,
+                    layout: { padding: { top: 18, right: 28, bottom: 10, left: 12 } },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: "#0f172a", font: { size: 22, weight: "600" }, boxWidth: 42, padding: 18 },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            ...reportScaleStyle(null),
+                            ticks: { ...reportScaleStyle(null).ticks, autoSkip: true, maxTicksLimit: 11 },
+                        },
+                        y: reportScaleStyle(null),
+                    },
+                },
+                plugins: [reportBackgroundPlugin],
+            };
+        } else if (source.kind === "scatter") {
+            config = {
+                type: "scatter",
+                data: {
+                    datasets: [{
+                        label: `${source.yLabel || "Y"} vs ${source.xLabel || "X"}`,
+                        data: source.points,
+                        backgroundColor: source.color || "#a855f7",
+                        borderColor: source.color || "#a855f7",
+                        pointRadius: 5,
+                    }],
+                },
+                options: {
+                    responsive: false,
+                    animation: false,
+                    devicePixelRatio: 1,
+                    layout: { padding: { top: 18, right: 28, bottom: 10, left: 12 } },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: { color: "#0f172a", font: { size: 22, weight: "600" }, boxWidth: 42, padding: 18 },
+                        },
+                    },
+                    scales: {
+                        x: reportScaleStyle(source.xLabel || "X"),
+                        y: reportScaleStyle(source.yLabel || "Y"),
+                    },
+                },
+                plugins: [reportBackgroundPlugin],
+            };
+        } else if (source.kind === "timeline") {
+            const normalized = (source.segments || []).map((segment, index) => ({
+                label: segment.label ?? segment.Label ?? "Unknown",
+                startSeconds: Number(segment.startSeconds ?? segment.StartSeconds ?? 0),
+                endSeconds: Number(segment.endSeconds ?? segment.EndSeconds ?? 0),
+                color: timelineColor(segment.label ?? segment.Label ?? "Unknown", index),
+            }));
+            const labels = [...new Set(normalized.map(segment => segment.label))];
+            config = {
+                type: "bar",
+                data: {
+                    labels,
+                    datasets: [{
+                        data: normalized.map(segment => ({ x: [segment.startSeconds, segment.endSeconds], y: segment.label })),
+                        backgroundColor: normalized.map(segment => segment.color),
+                        borderColor: normalized.map(segment => segment.color),
+                        borderWidth: 2,
+                        borderSkipped: false,
+                        borderRadius: 5,
+                        barPercentage: 0.7,
+                        categoryPercentage: 0.82,
+                        maxBarThickness: 46,
+                        minBarLength: 5,
+                    }],
+                },
+                options: {
+                    indexAxis: "y",
+                    responsive: false,
+                    animation: false,
+                    devicePixelRatio: 1,
+                    layout: { padding: { top: 18, right: 28, bottom: 8, left: 12 } },
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            ...reportScaleStyle("Elapsed test time"),
+                            min: 0,
+                            max: Math.max(...normalized.map(segment => segment.endSeconds), 1),
+                            ticks: {
+                                ...reportScaleStyle("Elapsed test time").ticks,
+                                callback: tickValue => formatElapsed(tickValue),
+                                maxRotation: 0,
+                                maxTicksLimit: 12,
+                            },
+                        },
+                        y: {
+                            ticks: { color: "#334155", font: { size: 20, weight: "600" }, padding: 12 },
+                            grid: { display: false },
+                            border: { display: false },
+                        },
+                    },
+                },
+                plugins: [reportBackgroundPlugin],
+            };
+        } else {
+            return null;
+        }
+
+        const chart = new Chart(canvas, config);
+        chart.draw();
+        const result = { data: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
+        chart.destroy();
+        return result;
+    };
+
+    const comparisonValue = (item, camelName, pascalName) => item?.[camelName] ?? item?.[pascalName];
+
+    const comparisonScales = (commonMax, yTitle) => ({
+        x: {
+            type: "linear",
+            min: 0,
+            max: commonMax,
+            title: { display: true, text: "Elapsed test time", color: "#94a3b8" },
+            ticks: { color: "#94a3b8", maxTicksLimit: 10, callback: value => formatElapsed(value) },
+            grid: { color: "rgba(148,163,184,.12)" },
+        },
+        y: {
+            title: { display: true, text: yTitle, color: "#94a3b8" },
+            ticks: { color: "#94a3b8" },
+            grid: { color: "rgba(148,163,184,.12)" },
+        },
+    });
+
+    const renderComparisonLine = (id, runs, valueName, label, commonMax) => {
+        const canvas = document.getElementById(id);
+        if (!canvas) return null;
+        destroy(id);
+        const datasets = runs.map(run => ({
+            label: run.name,
+            data: run.samples.map(sample => ({
+                x: Number(comparisonValue(sample, "elapsedSeconds", "ElapsedSeconds")),
+                y: Number(comparisonValue(sample, valueName, valueName[0].toUpperCase() + valueName.slice(1))),
+            })).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y)),
+            borderColor: run.color,
+            backgroundColor: run.color,
+            borderWidth: 2,
+            pointRadius: 0,
+            pointHoverRadius: 3,
+            tension: .12,
+        }));
+        instances[id] = new Chart(canvas, {
+            type: "line",
+            data: { datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                normalized: true,
+                interaction: { mode: "nearest", intersect: false },
+                plugins: {
+                    legend: { labels: { color: "#cbd5e1", usePointStyle: true, pointStyle: "line" } },
+                    tooltip: { enabled: false },
+                },
+                scales: comparisonScales(commonMax, label),
+            },
+            plugins: [syncCursorPlugin],
+        });
+        instances[id].$syncTooltip = true;
+        return instances[id];
+    };
+
+    const renderComparisonCapping = (id, runs, commonMax) => {
+        const canvas = document.getElementById(id);
+        if (!canvas) return null;
+        destroy(id);
+        const reasons = [...new Set(runs.flatMap(run => run.cappingSegments.map(segment => comparisonValue(segment, "reason", "Reason"))))].filter(Boolean);
+        const labels = runs.flatMap(run => reasons
+            .filter(reason => run.cappingSegments.some(segment => comparisonValue(segment, "reason", "Reason") === reason))
+            .map(reason => `${run.name} · ${reason}`));
+        const datasets = reasons.map((reason, reasonIndex) => ({
+            label: reason,
+            data: runs.flatMap(run => run.cappingSegments
+                .filter(segment => comparisonValue(segment, "reason", "Reason") === reason)
+                .map(segment => ({
+                    x: [
+                        Number(comparisonValue(segment, "startSeconds", "StartSeconds")),
+                        Number(comparisonValue(segment, "endSeconds", "EndSeconds")),
+                    ],
+                    y: `${run.name} · ${reason}`,
+                }))),
+            backgroundColor: timelineColor(reason, reasonIndex),
+            borderColor: timelineColor(reason, reasonIndex),
+            borderWidth: 1,
+            borderSkipped: false,
+            borderRadius: 4,
+            barPercentage: .7,
+            categoryPercentage: .76,
+            minBarLength: 2,
+        }));
+        instances[id] = new Chart(canvas, {
+            type: "bar",
+            data: { labels, datasets },
+            options: {
+                indexAxis: "y",
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                plugins: {
+                    legend: { display: true, labels: { color: "#cbd5e1", usePointStyle: true, boxWidth: 8 } },
+                    tooltip: { callbacks: { label: context => `${context.dataset.label}: ${formatElapsed(context.raw.x[0])}–${formatElapsed(context.raw.x[1])}` } },
+                },
+                scales: {
+                    x: comparisonScales(commonMax, "").x,
+                    y: { ticks: { color: "#cbd5e1" }, grid: { display: false }, stacked: true },
+                },
+            },
+            plugins: [syncCursorPlugin],
+        });
+        return instances[id];
+    };
+
+    const renderComparison = rawRuns => {
+        if (!ensureChartJs()) return;
+        clearSyncGroup("comparison");
+        if (!Array.isArray(rawRuns)) {
+            console.error("Comparison chart data must be an array of runs.");
+            return;
+        }
+        const runs = (rawRuns || []).map((run, index) => ({
+            name: comparisonValue(run, "name", "Name") || `Run ${index + 1}`,
+            color: comparisonValue(run, "color", "Color") || timelineColor("", index),
+            samples: comparisonValue(run, "samples", "Samples") || [],
+            cappingSegments: comparisonValue(run, "cappingSegments", "CappingSegments") || [],
+        }));
+        const commonMax = Math.max(1, ...runs.flatMap(run => [
+            ...run.samples.map(sample => Number(comparisonValue(sample, "elapsedSeconds", "ElapsedSeconds")) || 0),
+            ...run.cappingSegments.map(segment => Number(comparisonValue(segment, "endSeconds", "EndSeconds")) || 0),
+        ]));
+        const charts = [
+            renderComparisonLine("comparison-gpu-temperature", runs, "gpuTemperature", "GPU temperature (°C)", commonMax),
+            renderComparisonLine("comparison-memory-temperature", runs, "memoryTemperature", "Memory temperature (°C)", commonMax),
+            renderComparisonLine("comparison-power", runs, "power", "Power (W)", commonMax),
+            renderComparisonLine("comparison-gpc-clock", runs, "gpcClock", "GPC clock (MHz)", commonMax),
+            renderComparisonLine("comparison-memory-clock", runs, "memoryClock", "Memory clock (MHz)", commonMax),
+            renderComparisonCapping("comparison-capping", runs, commonMax),
+        ].filter(Boolean);
+        const members = charts.map(chart => {
+            const canvas = chart.canvas;
+            const move = event => {
+                const rect = canvas.getBoundingClientRect();
+                const pixel = Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, event.clientX - rect.left));
+                const elapsed = Math.max(0, Math.min(commonMax, Number(chart.scales.x.getValueForPixel(pixel)) || 0));
+                charts.forEach(item => { item.$syncCursor = { mode: "value", value: elapsed }; item.draw(); });
+            };
+            const leave = () => {
+                charts.forEach(item => { item.$syncCursor = null; item.draw(); });
+            };
+            canvas.addEventListener("pointermove", move);
+            canvas.addEventListener("pointerleave", leave);
+            canvas.style.cursor = "crosshair";
+            return { chart, canvas, move, leave };
+        });
+        syncGroups.comparison = { members };
+    };
+
+    return { renderLine, renderScatter, renderTimeline, timelineCommand, createMainSyncGroup, renderComparison, exportImage, destroy, openModalFrom };
 })();

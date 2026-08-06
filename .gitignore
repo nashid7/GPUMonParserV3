@@ -2,6 +2,9 @@ bin/
 obj/
 publish/
 .codex-build-out/
+.codex-artifacts/
+.codex-release/
+samplelogs/
 .vs/
 .vscode/
 *.user
