@@ -1,0 +1,252 @@
+@using System.Globalization
+@using par.Services
+@inject IJSRuntime JS
+
+<div class="settings-bar">
+    <label class="setting preset-setting">
+        <span>Preset</span>
+        <select value="@SelectedPresetName" @onchange="OnPresetSelectedAsync">
+            <option value="">Custom</option>
+            @foreach (var preset in AllPresets)
+            {
+                <option value="@preset.Name">@PresetLabel(preset)</option>
+            }
+        </select>
+    </label>
+    <label class="setting">
+        <span>GPU utilization</span>
+        <div class="setting-inputs">
+            <input type="number" min="0" max="100" aria-label="Minimum GPU utilization" @bind="Settings.UtilizationMin" @bind:after="() => ChangedAsync(SettingsChange.Range)" />
+            <em>–</em>
+            <input type="number" min="0" max="100" aria-label="Maximum GPU utilization" @bind="Settings.UtilizationMax" @bind:after="() => ChangedAsync(SettingsChange.Range)" />
+            <em>%</em>
+        </div>
+    </label>
+    <label class="setting">
+        <span>Expected TGP</span>
+        <div class="setting-inputs">
+            <input type="number" min="0" step="0.1" aria-label="Expected TGP in watts" @bind="Settings.ExpectedTgpWatts" @bind:after="() => ChangedAsync(SettingsChange.Tgp)" />
+            <em>W</em>
+        </div>
+    </label>
+    <label class="setting">
+        <span>Pass if at least</span>
+        <div class="setting-inputs">
+            <input type="number" min="0" max="100" step="0.1" aria-label="Required percentage of samples" @bind="Settings.RequiredTgpPercent" @bind:after="() => ChangedAsync(SettingsChange.Tgp)" />
+            <em>% of samples</em>
+        </div>
+    </label>
+    <div class="setting-links">
+        @if (_editing is null)
+        {
+            <button type="button" class="link-button" @onclick="StartSaving">Save as preset</button>
+            @if (SelectedPreset is { BuiltIn: false } custom)
+            {
+                <button type="button" class="link-button danger" @onclick="() => DeletePresetAsync(custom)">Delete preset</button>
+            }
+        }
+    </div>
+</div>
+
+@if (_editing is not null)
+{
+    <div class="preset-editor">
+        <label>
+            <span>Preset name</span>
+            <input @bind="_editing.Name" @bind:event="oninput" placeholder="e.g. 163L project" />
+        </label>
+        <label>
+            <span>Use automatically for files starting with <small>(optional)</small></span>
+            <input @bind="_editing.FilePrefix" @bind:event="oninput" placeholder="e.g. 163L" />
+        </label>
+        <div class="preset-editor-actions">
+            <button type="button" class="btn btn-primary btn-sm" disabled="@string.IsNullOrWhiteSpace(_editing.Name)" @onclick="SavePresetAsync">Save</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="() => _editing = null">Cancel</button>
+        </div>
+    </div>
+}
+
+<style>
+    .settings-bar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 18px;padding:12px 14px;border:1px solid #223252;border-radius:12px;background:#0d1729}
+    .setting{display:flex;flex-direction:column;gap:4px;margin:0}
+    .setting>span{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#94a3b8}
+    .setting-inputs{display:flex;align-items:center;gap:6px}
+    .setting-inputs em{font-style:normal;color:#94a3b8;font-size:.82rem}
+    .settings-bar input,.settings-bar select,.preset-editor input{height:32px;padding:4px 8px;border:1px solid #334766;border-radius:7px;background:#0a1323;color:#f8fafc;font-size:.86rem}
+    .settings-bar input[type=number]{width:72px}
+    .preset-setting select{min-width:220px;max-width:340px}
+    .setting-links{display:flex;gap:12px;margin-left:auto;padding-bottom:6px}
+    .link-button{border:0;background:none;padding:0;color:#7dd3fc;font-size:.78rem;cursor:pointer}
+    .link-button:hover{text-decoration:underline}
+    .link-button.danger{color:#fca5a5}
+    .preset-editor{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px;margin-top:8px;padding:12px 14px;border:1px dashed #36527c;border-radius:12px;background:#0b1424}
+    .preset-editor label{display:flex;flex-direction:column;gap:4px;margin:0;font-size:.72rem;color:#94a3b8}
+    .preset-editor small{color:#64748b}
+    .preset-editor-actions{display:flex;gap:8px}
+    @@media(max-width:720px){.setting-links{margin-left:0}.preset-setting select{min-width:0;width:100%}}
+</style>
+
+@code {
+    private static readonly AnalysisPreset[] BuiltInPresets =
+    [
+        new("Standard", null, 99, 100, GpuMonLogAnalyzer.DefaultExpectedTgpWatts, GpuMonLogAnalyzer.DefaultRequiredTgpPercent, BuiltIn: true),
+        new("Wide range", null, 90, 100, GpuMonLogAnalyzer.DefaultExpectedTgpWatts, GpuMonLogAnalyzer.DefaultRequiredTgpPercent, BuiltIn: true),
+    ];
+
+    [Parameter, EditorRequired] public AnalysisSettings Settings { get; set; } = default!;
+    [Parameter] public EventCallback<SettingsChange> OnChanged { get; set; }
+
+    private List<AnalysisPreset> _userPresets = [];
+    private PresetDraft? _editing;
+    private Task? _loading;
+    private StoredValues? _beforeAutoApply;
+
+    private IEnumerable<AnalysisPreset> AllPresets => BuiltInPresets.Concat(_userPresets);
+    private AnalysisPreset? SelectedPreset => AllPresets.FirstOrDefault(preset => preset.Name == Settings.PresetName && Settings.Matches(preset))
+                                              ?? AllPresets.FirstOrDefault(Settings.Matches);
+    private string SelectedPresetName => SelectedPreset?.Name ?? "";
+
+    private sealed class PresetDraft
+    {
+        public string Name { get; set; } = "";
+        public string? FilePrefix { get; set; }
+    }
+
+    private sealed record StoredSettings(List<AnalysisPreset>? Presets, StoredValues? Last);
+    private sealed record StoredValues(int UtilizationMin, int UtilizationMax, decimal ExpectedTgpWatts, decimal RequiredTgpPercent, string? PresetName);
+
+    private static string Format(decimal value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+
+    private static string PresetLabel(AnalysisPreset preset)
+        => $"{preset.Name} · {preset.UtilizationMin}–{preset.UtilizationMax}% · {Format(preset.ExpectedTgpWatts)} W · {Format(preset.RequiredTgpPercent)}%" +
+           (string.IsNullOrWhiteSpace(preset.FilePrefix) ? "" : $" · auto for {preset.FilePrefix}*");
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        await EnsureLoadedAsync();
+    }
+
+    private Task EnsureLoadedAsync() => _loading ??= LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            var stored = await JS.InvokeAsync<StoredSettings>("gpuSettings.load");
+            _userPresets = stored.Presets ?? [];
+            if (stored.Last is { } last)
+            {
+                Settings.UtilizationMin = last.UtilizationMin;
+                Settings.UtilizationMax = last.UtilizationMax;
+                Settings.ExpectedTgpWatts = last.ExpectedTgpWatts;
+                Settings.RequiredTgpPercent = last.RequiredTgpPercent;
+                Settings.PresetName = last.PresetName;
+                await OnChanged.InvokeAsync(SettingsChange.Range);
+            }
+            StateHasChanged();
+        }
+        catch
+        {
+            // Saved settings are a convenience; defaults are used if storage is unavailable.
+        }
+    }
+
+    /// <summary>Finds the saved preset whose file prefix matches the file name (longest prefix wins).</summary>
+    public async Task<AnalysisPreset?> FindPresetForFileAsync(string fileName)
+    {
+        await EnsureLoadedAsync();
+        return _userPresets
+            .Where(preset => !string.IsNullOrWhiteSpace(preset.FilePrefix) && fileName.StartsWith(preset.FilePrefix!.Trim(), StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(preset => preset.FilePrefix!.Trim().Length)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Applies the preset whose file prefix matches the file name and returns its name. If nothing matches and the
+    /// current values were auto-applied for an earlier file, the settings the user had before are restored.
+    /// </summary>
+    public async Task<string?> ApplyForFileAsync(string fileName)
+    {
+        var match = await FindPresetForFileAsync(fileName);
+        if (match is null)
+        {
+            if (_beforeAutoApply is { } previous)
+            {
+                Settings.UtilizationMin = previous.UtilizationMin;
+                Settings.UtilizationMax = previous.UtilizationMax;
+                Settings.ExpectedTgpWatts = previous.ExpectedTgpWatts;
+                Settings.RequiredTgpPercent = previous.RequiredTgpPercent;
+                Settings.PresetName = previous.PresetName;
+                _beforeAutoApply = null;
+                StateHasChanged();
+            }
+            return null;
+        }
+        // Auto-applied presets are not saved as the remembered settings; only the user's own choices are.
+        _beforeAutoApply ??= new StoredValues(Settings.UtilizationMin, Settings.UtilizationMax, Settings.ExpectedTgpWatts, Settings.RequiredTgpPercent, Settings.PresetName);
+        Settings.Apply(match);
+        StateHasChanged();
+        return match.Name;
+    }
+
+    private async Task OnPresetSelectedAsync(ChangeEventArgs args)
+    {
+        _beforeAutoApply = null;
+        var preset = AllPresets.FirstOrDefault(item => item.Name == args.Value?.ToString());
+        if (preset is null)
+        {
+            Settings.PresetName = null;
+            await SaveLastAsync();
+            return;
+        }
+        Settings.Apply(preset);
+        await SaveLastAsync();
+        await OnChanged.InvokeAsync(SettingsChange.Range);
+    }
+
+    private async Task ChangedAsync(SettingsChange change)
+    {
+        _beforeAutoApply = null;
+        Settings.PresetName = SelectedPreset?.Name;
+        await SaveLastAsync();
+        await OnChanged.InvokeAsync(change);
+    }
+
+    private void StartSaving() => _editing = new PresetDraft { Name = SelectedPreset is { BuiltIn: false } preset ? preset.Name : "" };
+
+    private async Task SavePresetAsync()
+    {
+        if (_editing is null || string.IsNullOrWhiteSpace(_editing.Name)) return;
+        var name = _editing.Name.Trim();
+        if (BuiltInPresets.Any(preset => preset.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) name += " (custom)";
+        var prefix = string.IsNullOrWhiteSpace(_editing.FilePrefix) ? null : _editing.FilePrefix.Trim();
+        _userPresets.RemoveAll(preset => preset.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        _userPresets.Add(new AnalysisPreset(name, prefix, Settings.UtilizationMin, Settings.UtilizationMax, Settings.ExpectedTgpWatts, Settings.RequiredTgpPercent));
+        _userPresets = _userPresets.OrderBy(preset => preset.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        Settings.PresetName = name;
+        _editing = null;
+        await JS.InvokeVoidAsync("gpuSettings.savePresets", _userPresets);
+        await SaveLastAsync();
+    }
+
+    private async Task DeletePresetAsync(AnalysisPreset preset)
+    {
+        _userPresets.Remove(preset);
+        Settings.PresetName = null;
+        await JS.InvokeVoidAsync("gpuSettings.savePresets", _userPresets);
+        await SaveLastAsync();
+    }
+
+    private async Task SaveLastAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("gpuSettings.saveLast", new StoredValues(Settings.UtilizationMin, Settings.UtilizationMax, Settings.ExpectedTgpWatts, Settings.RequiredTgpPercent, Settings.PresetName));
+        }
+        catch
+        {
+            // Ignore storage failures.
+        }
+    }
+}

@@ -1,0 +1,64 @@
+@using par.Services
+
+<section class="activity">
+    <div class="activity-head">
+        <div>
+            <h5>@Title activity</h5>
+            <p>Counts within @UtilizationRange GPU utilization · shaded areas are in range · scroll to zoom, drag to pan</p>
+        </div>
+        <div class="activity-tools">
+            <button type="button" @onclick='() => OnCommand.InvokeAsync((ChartId, "previous"))'>‹ Previous change</button>
+            <button type="button" @onclick='() => OnCommand.InvokeAsync((ChartId, "next"))'>Next change ›</button>
+            <button type="button" @onclick='() => OnCommand.InvokeAsync((ChartId, "full"))'>Reset zoom</button>
+            <button type="button" @onclick="() => OnExpand.InvokeAsync(ChartId)">Expand</button>
+        </div>
+    </div>
+    <div class="activity-chips">
+        @foreach (var item in Items.Where(item => item.InRangeSamples > 0))
+        {
+            <span class="activity-chip" style="@($"--chip:{ColorFor(item.Label)}")">
+                <i></i><b>@LabelFor(item.Label)</b>
+                @item.InRangeSamples.ToString("N0") samples · @item.InRangePeriods @(item.InRangePeriods == 1 ? "period" : "periods")
+            </span>
+        }
+        @if (!Items.Any(item => item.InRangeSamples > 0))
+        {
+            <span class="activity-none">None within range</span>
+        }
+    </div>
+    @if (Items.Where(item => item.InRangeSamples == 0).Select(item => LabelFor(item.Label)).ToArray() is { Length: > 0 } outside)
+    {
+        <p class="activity-outside">Only outside the range: @string.Join(", ", outside)</p>
+    }
+    <div class="timeline-frame">
+        <canvas id="@ChartId"></canvas>
+    </div>
+</section>
+
+<style>
+    .activity{margin-top:16px;padding:14px;border:1px solid #1f2d4a;border-radius:12px;background:#0d1729}
+    .activity-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+    .activity-head h5{margin:0;color:#f8fafc;font-size:1rem}
+    .activity-head p{margin:2px 0 0;color:#8293aa;font-size:.76rem}
+    .activity-tools{display:flex;gap:3px;padding:3px;border:1px solid #263754;border-radius:9px;background:#091221}
+    .activity-tools button{border:0;border-radius:6px;padding:4px 8px;background:transparent;color:#aebed2;font-size:.72rem;cursor:pointer}
+    .activity-tools button:hover{background:#1a2942;color:#f8fafc}
+    .activity-chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 6px}
+    .activity-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid color-mix(in srgb,var(--chip) 55%,#263754);border-radius:999px;background:color-mix(in srgb,var(--chip) 10%,#0b1424);color:#cbd5e1;font-size:.76rem}
+    .activity-chip i{width:8px;height:8px;border-radius:50%;background:var(--chip)}
+    .activity-chip b{color:#f8fafc}
+    .activity-none{color:#94a3b8;font-size:.78rem}
+    .activity-outside{margin:0 0 6px;color:#64748b;font-size:.72rem}
+    .timeline-frame{position:relative;height:220px;padding:8px;border:1px solid #1f2d4a;border-radius:10px;background:#08111f}
+</style>
+
+@code {
+    [Parameter, EditorRequired] public string Title { get; set; } = "";
+    [Parameter, EditorRequired] public string ChartId { get; set; } = "";
+    [Parameter, EditorRequired] public IReadOnlyList<ActivitySummary> Items { get; set; } = [];
+    [Parameter] public Func<string, string> LabelFor { get; set; } = label => label;
+    [Parameter] public Func<string, string> ColorFor { get; set; } = _ => "#94a3b8";
+    [Parameter] public string UtilizationRange { get; set; } = "";
+    [Parameter] public EventCallback<string> OnExpand { get; set; }
+    [Parameter] public EventCallback<(string ChartId, string Command)> OnCommand { get; set; }
+}

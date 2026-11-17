@@ -6,8 +6,8 @@ var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
-builder.Services.AddScoped<NotificationService>();
-builder.Services.AddScoped<GpuComparisonParser>();
+builder.Services.AddSingleton<GpuMonLogAnalyzer>();
+builder.Services.AddSingleton<LogHandoffService>();
 
 var app = builder.Build();
 
@@ -27,32 +27,5 @@ app.UseAntiforgery();
 app.MapStaticAssets();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
-
-var uploadsRoot = Path.Combine(app.Environment.WebRootPath, "uploads");
-Directory.CreateDirectory(uploadsRoot);
-
-app.MapPost("api/upload/save", async (HttpRequest req) =>
-{
-    var form = await req.ReadFormAsync();
-    var file = form.Files.FirstOrDefault();
-    if (file is null) return Results.BadRequest();
-    var temp = Path.Combine(app.Environment.WebRootPath, file.FileName);
-    await using var fs = File.Create(temp);
-    await file.CopyToAsync(fs);
-    return Results.Ok();
-});
-
-app.MapPost("api/upload/remove", async (HttpRequest req) =>
-{
-    var form = await req.ReadFormAsync();
-    var name = form.Files.FirstOrDefault()?.FileName;
-    if (!string.IsNullOrEmpty(name))
-    {
-        var temp = Path.Combine(app.Environment.WebRootPath, name);
-        if (File.Exists(temp)) File.Delete(temp);
-    }
-
-    return Results.Ok();
-});
 
 app.Run();

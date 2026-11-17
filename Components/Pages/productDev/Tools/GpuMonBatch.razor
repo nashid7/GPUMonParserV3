@@ -1,0 +1,283 @@
+@page "/productDev/Tools/gpuMonBatch"
+@using System.Globalization
+@using System.Text
+@using par.Components.Shared
+@using par.Services
+@inject GpuMonLogAnalyzer Analyzer
+@inject LogHandoffService Handoff
+@inject IJSRuntime JS
+@rendermode InteractiveServer
+
+<PageTitle>GPU Log Batch Check</PageTitle>
+
+<div class="page-head">
+    <h3>Batch check</h3>
+    <p class="muted">Drop several GPUMON logs to get a TGP PASS/FAIL for every unit. Files that match a saved preset's file prefix use that preset; all others use the settings below.</p>
+</div>
+
+<div class="dropzone @(_dragOver ? "over" : "") @(_rows.Count > 0 ? "compact" : "")"
+     @ondragenter="() => _dragOver = true" @ondragleave="() => _dragOver = false" @ondrop="() => _dragOver = false">
+    <InputFile OnChange="OnFilesSelectedAsync" multiple accept=".csv,text/csv" class="dropzone-input" title="Choose GPUMON .csv files" />
+    <div class="dropzone-text">
+        @if (_progress is not null)
+        {
+            <span class="spinner" aria-hidden="true"></span>
+            <strong>@_progress</strong>
+        }
+        else if (_rows.Count > 0)
+        {
+            <strong>Drop more logs</strong>
+            <span>or click to add files</span>
+        }
+        else
+        {
+            <strong>Drop GPUMON .csv files here</strong>
+            <span>or click to choose several</span>
+        }
+    </div>
+</div>
+
+<div class="settings-wrap">
+    <AnalysisSettingsBar @ref="_settingsBar" Settings="_settings" OnChanged="OnSettingsChangedAsync" />
+</div>
+
+@if (_rows.Count > 0)
+{
+    var analyzed = _rows.Where(row => row.Analysis is not null).ToArray();
+    var passed = analyzed.Count(row => row.Analysis!.TgpCheck.Passed == true);
+    var failed = analyzed.Count(row => row.Analysis!.TgpCheck.Passed == false);
+    <section class="batch">
+        <div class="batch-head">
+            <div class="batch-summary">
+                <strong>@_rows.Count @(_rows.Count == 1 ? "log" : "logs")</strong>
+                <span class="tally pass">@passed PASS</span>
+                <span class="tally fail">@failed FAIL</span>
+                @if (_rows.Count - passed - failed > 0)
+                {
+                    <span class="tally na">@(_rows.Count - passed - failed) @(_rows.Count - passed - failed == 1 ? "error" : "errors")</span>
+                }
+            </div>
+            <div class="batch-actions">
+                <button class="btn btn-primary btn-sm" @onclick="ExportCsvAsync" disabled="@(analyzed.Length == 0)">Export CSV</button>
+                <button class="btn btn-outline-secondary btn-sm" @onclick="Clear">Clear</button>
+            </div>
+        </div>
+        <div class="batch-table-wrap">
+            <table class="batch-table">
+                <thead>
+                    <tr>
+                        <th class="file-col">Log</th>
+                        <th>Result</th>
+                        <th>≥ expected</th>
+                        <th>Passes up to</th>
+                        <th>Samples</th>
+                        <th>TGP avg (W)</th>
+                        <th>GPU temp avg/max (°C)</th>
+                        <th>GPC avg (MHz)</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in _rows)
+                    {
+                        <tr @key="row.FileName">
+                            <th scope="row" class="file-col" title="@row.FileName">@row.FileName</th>
+                            @if (row.Analysis is { } a)
+                            {
+                                var check = a.TgpCheck;
+                                <td>
+                                    <span class="badge-result @(check.Passed switch { true => "pass", false => "fail", _ => "na" })">@check.Verdict</span>
+                                    @if (row.Preset is not null)
+                                    {
+                                        <small class="row-preset" title="Preset applied from the file name">@row.Preset.Name</small>
+                                    }
+                                </td>
+                                <td>@Pct(check.PercentAtOrAbove) <small class="muted-cell">≥ @Fmt(check.ExpectedWatts) W</small></td>
+                                <td>@(check.PassingTgpWatts is null ? "–" : $"{Fmt(check.PassingTgpWatts)} W")</td>
+                                <td class="@(a.ReliabilityWarning is null ? "" : "warn")" title="@a.ReliabilityWarning">@a.InRangeSamples.Count.ToString("N0")@(a.ReliabilityWarning is null ? "" : " ⚠")</td>
+                                <td>@Fmt(a.Tgp.Average)</td>
+                                <td>@Fmt(a.GpuTemperature.Average) / @Fmt(a.GpuTemperature.Maximum)</td>
+                                <td>@Fmt(a.GpcClock.Average)</td>
+                                <td class="row-actions">
+                                    <a href="@($"/productDev/Tools/gpuMonLogParser?log={row.HandoffId}")">Open</a>
+                                    <button title="Remove" @onclick="() => Remove(row)">×</button>
+                                </td>
+                            }
+                            else
+                            {
+                                <td colspan="7" class="row-error" title="@row.Error">@ShortError(row.Error)</td>
+                                <td class="row-actions"><button title="Remove" @onclick="() => Remove(row)">×</button></td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <p class="muted small">⚠ = fewer than @GpuMonLogAnalyzer.MinimumReliableSamples samples within the utilization range, so the result may not be reliable. “Samples” counts samples within the utilization range. “Passes up to” is the highest expected TGP the unit would still pass.</p>
+    </section>
+}
+
+<style>
+    .page-head h3{margin:0 0 4px;color:#f8fafc}
+    .muted{color:#94a3b8;font-size:.88rem}
+    .muted.small{margin:10px 0 0;font-size:.74rem}
+    .dropzone{position:relative;display:flex;align-items:center;justify-content:center;min-height:120px;margin-top:14px;border:2px dashed #36527c;border-radius:14px;background:#0d1729;transition:border-color .15s,background .15s,min-height .15s}
+    .dropzone:hover,.dropzone.over{border-color:#38bdf8;background:#0f1d33}
+    .dropzone.compact{min-height:58px}
+    .dropzone-input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+    .dropzone-text{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;pointer-events:none;color:#cbd5e1}
+    .dropzone-text strong{color:#f8fafc}
+    .dropzone-text span{color:#94a3b8;font-size:.86rem}
+    .spinner{width:18px;height:18px;border:2px solid #36527c;border-top-color:#38bdf8;border-radius:50%;animation:spin .8s linear infinite}
+    @@keyframes spin{to{transform:rotate(360deg)}}
+    .settings-wrap{margin-top:12px}
+    .batch{margin-top:18px}
+    .batch-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+    .batch-summary{display:flex;align-items:center;gap:10px;color:#f8fafc}
+    .tally{padding:3px 10px;border-radius:999px;font-size:.78rem;font-weight:700}
+    .tally.pass{background:#14532d;color:#bbf7d0}.tally.fail{background:#7f1d1d;color:#fecaca}.tally.na{background:#334155;color:#cbd5e1}
+    .batch-actions{display:flex;gap:8px}
+    .batch-table-wrap{overflow:auto;margin-top:10px;border:1px solid #1f2d4a;border-radius:12px}
+    .batch-table{width:100%;border-collapse:separate;border-spacing:0;font-variant-numeric:tabular-nums}
+    .batch-table th,.batch-table td{padding:8px 10px;border-bottom:1px solid #1a2741;color:#dbeafe;font-size:.84rem;text-align:right;white-space:nowrap}
+    .batch-table thead th{position:sticky;top:0;background:#111c31;color:#94a3b8;font-size:.66rem;text-transform:uppercase;letter-spacing:.04em}
+    .batch-table .file-col{max-width:280px;overflow:hidden;text-overflow:ellipsis;text-align:left;color:#f8fafc;font-weight:600}
+    .batch-table tbody tr:last-child>*{border-bottom:0}
+    .batch-table tbody tr:hover>*{background:#0f1a2e}
+    .badge-result{display:inline-block;min-width:50px;padding:2px 8px;border-radius:6px;color:#fff;font-size:.74rem;font-weight:800;text-align:center;letter-spacing:.05em}
+    .badge-result.pass{background:#16a34a}.badge-result.fail{background:#dc2626}.badge-result.na{background:#475569}
+    .batch-table td.warn{color:#fde68a}
+    .row-error{color:#fca5a5!important;text-align:left!important;white-space:normal!important}
+    .row-preset{display:block;margin-top:2px;color:#7dd3fc;font-size:.66rem}
+    .muted-cell{color:#64748b;font-size:.7rem}
+    .row-actions{display:flex;gap:10px;justify-content:flex-end;align-items:center}
+    .row-actions a{color:#7dd3fc;text-decoration:none;font-size:.78rem}
+    .row-actions a:hover{text-decoration:underline}
+    .row-actions button{border:0;background:none;color:#94a3b8;font-size:1.05rem;line-height:1;cursor:pointer}
+</style>
+
+@code {
+    private const int MaxFiles = 200;
+    private readonly AnalysisSettings _settings = new();
+    private readonly List<BatchRow> _rows = [];
+    private string? _progress;
+    private bool _dragOver;
+
+    private sealed class BatchRow(string fileName)
+    {
+        public string FileName { get; } = fileName;
+        public GpuMonLog? Log { get; set; }
+        public Guid HandoffId { get; set; }
+        public GpuMonAnalysis? Analysis { get; set; }
+        public string? Error { get; set; }
+        public AnalysisPreset? Preset { get; set; }
+    }
+
+    private AnalysisSettingsBar? _settingsBar;
+
+    private static string? ShortError(string? error)
+        => error is null ? null
+            : error.StartsWith("This doesn't look like a GPU Monitor", StringComparison.Ordinal) ? "Not a GPUMON log (no GPU Utilization column found)."
+            : error.Length > 120 ? error[..120] + "…" : error;
+
+    // Round half away from zero so displayed values match Excel (e.g. 83.195 -> 83.2).
+    private static string Fmt(decimal? value) => value.HasValue ? Math.Round(value.Value, 2, MidpointRounding.AwayFromZero).ToString("0.##", CultureInfo.InvariantCulture) : "–";
+    private static string Pct(decimal? value) => value.HasValue ? Math.Round(value.Value, 2, MidpointRounding.AwayFromZero).ToString("0.00", CultureInfo.InvariantCulture) + "%" : "n/a";
+
+    private async Task OnFilesSelectedAsync(InputFileChangeEventArgs e)
+    {
+        _dragOver = false;
+        var files = e.GetMultipleFiles(MaxFiles);
+        for (var index = 0; index < files.Count; index++)
+        {
+            var file = files[index];
+            _progress = $"Reading {index + 1} of {files.Count}: {file.Name}";
+            StateHasChanged();
+            var row = new BatchRow(file.Name);
+            try
+            {
+                if (!Path.GetExtension(file.Name).Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Not a .csv file.");
+                await using var stream = file.OpenReadStream(50 * 1024 * 1024);
+                using var reader = new StreamReader(stream, Encoding.UTF8, true);
+                row.Log = Analyzer.Parse(await reader.ReadToEndAsync());
+                row.HandoffId = Handoff.Offer(file.Name, row.Log);
+                row.Preset = _settingsBar is null ? null : await _settingsBar.FindPresetForFileAsync(file.Name);
+                Analyze(row);
+            }
+            catch (Exception ex)
+            {
+                row.Error = ex.Message;
+            }
+            _rows.RemoveAll(existing => existing.FileName.Equals(file.Name, StringComparison.OrdinalIgnoreCase));
+            _rows.Add(row);
+        }
+        _rows.Sort((left, right) => string.Compare(left.FileName, right.FileName, StringComparison.OrdinalIgnoreCase));
+        _progress = null;
+    }
+
+    private void Analyze(BatchRow row)
+    {
+        if (row.Log is null) return;
+        row.Analysis = row.Preset is { } preset
+            ? Analyzer.Analyze(row.Log, preset.UtilizationMin, preset.UtilizationMax, preset.ExpectedTgpWatts, preset.RequiredTgpPercent)
+            : Analyzer.Analyze(row.Log, _settings.UtilizationMin, _settings.UtilizationMax, _settings.ExpectedTgpWatts, _settings.RequiredTgpPercent);
+    }
+
+    private async Task OnSettingsChangedAsync(SettingsChange change)
+    {
+        // Presets may have been saved or deleted, so re-resolve them before re-analyzing.
+        foreach (var row in _rows)
+        {
+            if (row.Log is null) continue;
+            row.Preset = _settingsBar is null ? null : await _settingsBar.FindPresetForFileAsync(row.FileName);
+            Analyze(row);
+        }
+    }
+
+    private void Remove(BatchRow row) => _rows.Remove(row);
+
+    private void Clear() => _rows.Clear();
+
+    private async Task ExportCsvAsync()
+    {
+        static string Cell(object? value)
+        {
+            var text = value switch
+            {
+                null => "",
+                decimal number => Math.Round(number, 2, MidpointRounding.AwayFromZero).ToString(CultureInfo.InvariantCulture),
+                IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+                _ => value.ToString() ?? ""
+            };
+            const char quote = '\u0022';
+            var escaped = text.Replace(quote.ToString(), new string(quote, 2));
+            return text.IndexOfAny([',', quote, '\n']) >= 0 ? quote + escaped + quote : text;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Join(',', "File", "Result", "Percent >= expected", "Samples >= expected", "TGP samples", "Expected TGP (W)", "Required (%)",
+            "GPU utilization range", "Passes up to (W)", "Samples short", "In-range samples", "Total samples",
+            "TGP min (W)", "TGP avg (W)", "TGP max (W)", "GPU temp min (C)", "GPU temp avg (C)", "GPU temp max (C)",
+            "Mem temp min (C)", "Mem temp avg (C)", "Mem temp max (C)", "GPC clock avg (MHz)", "Memory clock avg (MHz)",
+            "GPU", "VBIOS", "Driver", "Warning or error"));
+        foreach (var row in _rows)
+        {
+            if (row.Analysis is not { } a || row.Log is null)
+            {
+                sb.AppendLine(string.Join(',', Cell(row.FileName), "ERROR", string.Join(',', Enumerable.Repeat("", 24)), Cell(row.Error)));
+                continue;
+            }
+            var c = a.TgpCheck;
+            sb.AppendLine(string.Join(',', new object?[]
+            {
+                row.FileName, c.Verdict, c.PercentAtOrAbove, c.SamplesAtOrAbove, c.SampleCount, c.ExpectedWatts, c.RequiredPercent,
+                a.UtilizationRange, c.PassingTgpWatts, c.SamplesShort, a.InRangeSamples.Count, row.Log.Samples.Count,
+                a.Tgp.Minimum, a.Tgp.Average, a.Tgp.Maximum, a.GpuTemperature.Minimum, a.GpuTemperature.Average, a.GpuTemperature.Maximum,
+                a.MemoryTemperature.Minimum, a.MemoryTemperature.Average, a.MemoryTemperature.Maximum, a.GpcClock.Average, a.MemoryClock.Average,
+                row.Log.BrandName, row.Log.VbiosVersion, row.Log.DriverVersion, a.ReliabilityWarning
+            }.Select(Cell)));
+        }
+        await JS.InvokeVoidAsync("gpuSettings.downloadText", $"gpumon-batch-{DateTime.Now:yyyyMMdd-HHmm}.csv", sb.ToString(), "text/csv;charset=utf-8");
+    }
+}

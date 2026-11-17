@@ -13,6 +13,35 @@ window.gpuCharts = (() => {
         return true;
     };
 
+    // Runs fn at most once per animation frame with the latest arguments, so fast pointer/wheel events
+    // never trigger more redraws than the screen can show.
+    const perFrame = fn => {
+        let frame = 0;
+        let latest = [];
+        return (...args) => {
+            latest = args;
+            if (frame) return;
+            frame = requestAnimationFrame(() => {
+                frame = 0;
+                fn(...latest);
+            });
+        };
+    };
+
+    // Index of the point whose x is closest to value; points must be sorted by x.
+    const nearestByX = (points, value) => {
+        let low = 0;
+        let high = points.length - 1;
+        if (high < 0) return -1;
+        while (low < high) {
+            const middle = (low + high) >> 1;
+            if (Number(points[middle].x) < value) low = middle + 1;
+            else high = middle;
+        }
+        if (low > 0 && Math.abs(Number(points[low - 1].x) - value) <= Math.abs(Number(points[low].x) - value)) return low - 1;
+        return low;
+    };
+
     const destroy = (id) => {
         const expandedState = expandedZoomStates[id];
         if (expandedState?.canvas && expandedState.wheel) {
@@ -30,6 +59,7 @@ window.gpuCharts = (() => {
             delete timelineStates[id];
         }
         if (instances[id]) {
+            instances[id].$cursorLayer?.remove();
             instances[id].destroy();
             delete instances[id];
         }
@@ -102,7 +132,7 @@ window.gpuCharts = (() => {
         return `${String(resultHours).padStart(2, "0")}:${String(resultMinutes).padStart(2, "0")}:${String(resultSeconds).padStart(2, "0")}.${String(resultMilliseconds).padStart(3, "0")}`;
     };
 
-    const updateTimelineInspector = (inspector, segments, seconds, title) => {
+    const updateTimelineInspector = (inspector, segments, seconds, title, highlights) => {
         if (!inspector) return;
         const active = segments.filter(segment =>
             seconds >= segment.startSeconds && seconds < segment.endSeconds);
@@ -113,6 +143,15 @@ window.gpuCharts = (() => {
         time.className = "pointer-time";
         time.textContent = `${clockTime || "Time unavailable"} · +${formatElapsed(seconds)}`;
         inspector.appendChild(time);
+
+        if (highlights?.length) {
+            const inRange = highlights.some(range => seconds >= range.start && seconds < range.end);
+            const range = document.createElement("div");
+            range.className = "pointer-overlap";
+            range.style.color = inRange ? "#4ade80" : "#94a3b8";
+            range.textContent = inRange ? "Within utilization range" : "Outside utilization range";
+            inspector.appendChild(range);
+        }
 
         const badges = document.createElement("div");
         badges.className = "pointer-badges";
@@ -161,15 +200,45 @@ window.gpuCharts = (() => {
         state.inspector.style.top = `${top}px`;
     };
 
+    const normalizeHighlights = highlights => (highlights || []).map(range => ({
+        start: Number(range.startSeconds ?? range.StartSeconds ?? 0),
+        end: Number(range.endSeconds ?? range.EndSeconds ?? 0),
+    })).filter(range => Number.isFinite(range.start) && Number.isFinite(range.end) && range.end > range.start);
+
+    // Shades the elapsed-time windows where GPU utilization is inside the selected range.
+    const inRangeShadePlugin = {
+        id: "inRangeShade",
+        beforeDatasetsDraw(chart) {
+            const windows = chart.$inRangeWindows;
+            if (!windows?.length) return;
+            const { ctx: chartContext, chartArea, scales } = chart;
+            chartContext.save();
+            chartContext.beginPath();
+            chartContext.rect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top);
+            chartContext.clip();
+            chartContext.fillStyle = chart.$inRangeColor || "rgba(34,197,94,0.14)";
+            for (const range of windows) {
+                const left = scales.x.getPixelForValue(range.start);
+                const right = scales.x.getPixelForValue(range.end);
+                if (right < chartArea.left || left > chartArea.right) continue;
+                chartContext.fillRect(left, chartArea.top, Math.max(1, right - left), chartArea.bottom - chartArea.top);
+            }
+            chartContext.restore();
+        },
+    };
+
     const timelineCursorPlugin = {
         id: "timelineCursor",
         afterDatasetsDraw(chart) {
-            if (!Number.isFinite(chart.$timelineCursorX)) return;
+            const seconds = chart.$timelineCursorSeconds;
+            if (!Number.isFinite(seconds)) return;
             const { ctx: chartContext, chartArea } = chart;
+            const x = chart.scales.x.getPixelForValue(seconds);
+            if (x < chartArea.left || x > chartArea.right) return;
             chartContext.save();
             chartContext.beginPath();
-            chartContext.moveTo(chart.$timelineCursorX, chartArea.top);
-            chartContext.lineTo(chart.$timelineCursorX, chartArea.bottom);
+            chartContext.moveTo(x, chartArea.top);
+            chartContext.lineTo(x, chartArea.bottom);
             chartContext.lineWidth = 1;
             chartContext.strokeStyle = "rgba(226,232,240,0.9)";
             chartContext.setLineDash([4, 3]);
@@ -187,15 +256,12 @@ window.gpuCharts = (() => {
         const max = min + width;
         state.chart.options.scales.x.min = min;
         state.chart.options.scales.x.max = max;
+        state.chart.$timelineCursorSeconds = state.cursorSeconds;
         state.chart.update("none");
 
         const cursorIsVisible = state.cursorSeconds >= min && state.cursorSeconds <= max;
-        state.chart.$timelineCursorX = cursorIsVisible
-            ? state.chart.scales.x.getPixelForValue(state.cursorSeconds)
-            : Number.NaN;
-        state.chart.draw();
         if (cursorIsVisible && state.inspector.classList.contains("show"))
-            positionTimelineInspector(state, state.chart.$timelineCursorX, state.cursorY);
+            positionTimelineInspector(state, state.chart.scales.x.getPixelForValue(state.cursorSeconds), state.cursorY);
     };
 
     const setTimelineCursor = (state, seconds, ensureVisible = false, pointerY = null) => {
@@ -213,13 +279,12 @@ window.gpuCharts = (() => {
             max = Number(state.chart.options.scales.x.max);
         }
 
-        updateTimelineInspector(state.inspector, state.segments, state.cursorSeconds, state.title);
-        state.chart.$timelineCursorX = state.cursorSeconds >= min && state.cursorSeconds <= max
-            ? state.chart.scales.x.getPixelForValue(state.cursorSeconds)
-            : Number.NaN;
+        updateTimelineInspector(state.inspector, state.segments, state.cursorSeconds, state.title, state.highlights);
+        const cursorIsVisible = state.cursorSeconds >= min && state.cursorSeconds <= max;
+        state.chart.$timelineCursorSeconds = state.cursorSeconds;
         state.chart.draw();
-        if (Number.isFinite(state.chart.$timelineCursorX) && (Number.isFinite(pointerY) || ensureVisible))
-            positionTimelineInspector(state, state.chart.$timelineCursorX, state.cursorY);
+        if (cursorIsVisible && (Number.isFinite(pointerY) || ensureVisible))
+            positionTimelineInspector(state, state.chart.scales.x.getPixelForValue(state.cursorSeconds), state.cursorY);
     };
 
     const zoomTimelineAround = (state, center, factor) => {
@@ -273,13 +338,28 @@ window.gpuCharts = (() => {
     };
 
     const attachTimelineInteractions = (state) => {
+        let pendingFactor = 1;
+        let pendingCenter = 0;
+        const zoom = perFrame(() => {
+            const factor = pendingFactor;
+            pendingFactor = 1;
+            zoomTimelineAround(state, pendingCenter, factor);
+        });
+        const pan = perFrame((min, max) => applyTimelineWindow(state, min, max));
+        const hover = perFrame((clientX, clientY) => {
+            const rect = state.canvas.getBoundingClientRect();
+            const { left, right } = state.chart.chartArea;
+            const cursorX = Math.max(left, Math.min(right, clientX - rect.left));
+            setTimelineCursor(state, state.chart.scales.x.getValueForPixel(cursorX), false, clientY - rect.top);
+        });
+
         const wheel = event => {
             event.preventDefault();
             const rect = state.canvas.getBoundingClientRect();
-            const pixel = event.clientX - rect.left;
-            const center = state.chart.scales.x.getValueForPixel(pixel);
-            setTimelineCursor(state, center, false, event.clientY - rect.top);
-            zoomTimelineAround(state, center, event.deltaY < 0 ? 0.72 : 1.4);
+            pendingCenter = state.chart.scales.x.getValueForPixel(event.clientX - rect.left);
+            pendingFactor *= event.deltaY < 0 ? 0.72 : 1.4;
+            zoom();
+            hover(event.clientX, event.clientY);
         };
         const pointerDown = event => {
             if (event.button !== 0) return;
@@ -292,12 +372,15 @@ window.gpuCharts = (() => {
             state.canvas.style.cursor = "grabbing";
         };
         const pointerMove = event => {
-            if (!state.drag) return;
+            if (!state.drag) {
+                hover(event.clientX, event.clientY);
+                return;
+            }
             event.preventDefault();
             const chartWidth = Math.max(1, state.chart.chartArea.right - state.chart.chartArea.left);
             const secondsPerPixel = (state.drag.max - state.drag.min) / chartWidth;
             const shift = -(event.clientX - state.drag.clientX) * secondsPerPixel;
-            applyTimelineWindow(state, state.drag.min + shift, state.drag.max + shift);
+            pan(state.drag.min + shift, state.drag.max + shift);
         };
         const pointerUp = event => {
             if (!state.drag) return;
@@ -316,12 +399,51 @@ window.gpuCharts = (() => {
         state.canvas.style.touchAction = "none";
     };
 
-    const renderLine = (id, labels, data, label, color) => {
+    // Dashed "expected" line; samples below it are drawn in red (used for the TGP chart).
+    const thresholdPlugin = {
+        id: "thresholdLine",
+        afterDatasetsDraw(chart) {
+            const threshold = chart.$threshold;
+            if (!Number.isFinite(threshold) || !chart.scales.y) return;
+            const y = chart.scales.y.getPixelForValue(threshold);
+            const { left, right, top, bottom } = chart.chartArea;
+            if (y < top || y > bottom) return;
+            const context = chart.ctx;
+            const large = chart.$reportScale ? 2 : 1;
+            context.save();
+            context.beginPath();
+            context.moveTo(left, y);
+            context.lineTo(right, y);
+            context.lineWidth = 1.5 * large;
+            context.strokeStyle = "#f87171";
+            context.setLineDash([6 * large, 4 * large]);
+            context.stroke();
+            context.setLineDash([]);
+            context.font = `600 ${11 * large}px system-ui, sans-serif`;
+            context.fillStyle = "#f87171";
+            context.textAlign = "right";
+            context.fillText(`Expected ${threshold.toLocaleString(undefined, { maximumFractionDigits: 2 })} W`, right - 4, y - 5 * large);
+            context.restore();
+        },
+    };
+
+    const thresholdDatasetStyle = (threshold, color) => !Number.isFinite(threshold) ? {} : {
+        pointBackgroundColor: context => Number(context.raw) < threshold ? "#ef4444" : color,
+        pointBorderColor: context => Number(context.raw) < threshold ? "#ef4444" : color,
+        segment: {
+            borderColor: context => context.p0.parsed.y < threshold || context.p1.parsed.y < threshold ? "#ef4444" : undefined,
+        },
+    };
+
+    const thresholdScale = threshold => !Number.isFinite(threshold) ? {} : { suggestedMin: threshold - 1, suggestedMax: threshold + 1 };
+
+    const renderLine = (id, labels, data, label, color, threshold, inspect = false) => {
         if (!ensureChartJs()) return;
         const ctx = document.getElementById(id);
         if (!ctx) return;
         destroy(id);
-        cache[id] = { kind: "line", labels, data, label, color };
+        const expected = threshold === null || threshold === undefined ? Number.NaN : Number(threshold);
+        cache[id] = { kind: "line", labels, data, label, color, threshold: expected };
         instances[id] = new Chart(ctx, {
             type: "line",
             data: {
@@ -332,34 +454,71 @@ window.gpuCharts = (() => {
                         data,
                         borderColor: color || "#3b82f6",
                         backgroundColor: "rgba(59,130,246,0.15)",
+                        borderWidth: 1.5,
                         fill: false,
-                        pointRadius: 1,
-                        tension: 0.2,
+                        pointRadius: 0,
+                        pointHoverRadius: inspect ? 3 : 0,
+                        tension: 0,
+                        spanGaps: true,
+                        ...thresholdDatasetStyle(expected, color || "#3b82f6"),
                     },
                 ],
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                animation: false,
+                normalized: true,
+                // The small charts use the synced cursor/readout instead of Chart.js hover handling, which is much cheaper.
+                events: inspect ? ["mousemove", "mouseout", "click"] : [],
                 interaction: { mode: "index", intersect: false },
-                plugins: { legend: { display: true } },
+                plugins: { legend: { display: inspect }, tooltip: { enabled: inspect, animation: false } },
                 scales: {
-                    x: { ticks: { autoSkip: true, maxTicksLimit: 10 } },
-                    y: { beginAtZero: false },
+                    x: { ticks: { autoSkip: true, maxTicksLimit: 8, maxRotation: 0, sampleSize: 24 } },
+                    y: { beginAtZero: false, ticks: { sampleSize: 24 }, afterFit: fixedYAxisWidth, ...thresholdScale(expected) },
                 },
             },
-            plugins: [syncCursorPlugin],
+            plugins: [syncCursorPlugin, thresholdPlugin],
         });
+        instances[id].$threshold = expected;
     };
 
-    const syncCursorPlugin = {
-        id: "syncCursor",
-        afterDatasetsDraw(chart) {
-            const cursor = chart.$syncCursor;
-            if (!cursor) return;
+    // Transparent canvas layered over a chart. The hover cursor is drawn here, so moving the mouse
+    // never re-renders the chart's lines, axes or grid.
+    const cursorLayer = chart => {
+        const canvas = chart.canvas;
+        if (!canvas?.parentElement) return null;
+        let layer = chart.$cursorLayer;
+        if (!layer || !layer.isConnected) {
+            layer = document.createElement("canvas");
+            layer.style.position = "absolute";
+            layer.style.pointerEvents = "none";
+            if (getComputedStyle(canvas.parentElement).position === "static") canvas.parentElement.style.position = "relative";
+            canvas.parentElement.appendChild(layer);
+            chart.$cursorLayer = layer;
+        }
+        if (layer.width !== canvas.width || layer.height !== canvas.height) {
+            layer.width = canvas.width;
+            layer.height = canvas.height;
+        }
+        layer.style.left = `${canvas.offsetLeft}px`;
+        layer.style.top = `${canvas.offsetTop}px`;
+        layer.style.width = `${canvas.clientWidth}px`;
+        layer.style.height = `${canvas.clientHeight}px`;
+        const context = layer.getContext("2d");
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.clearRect(0, 0, layer.width, layer.height);
+        const ratio = canvas.clientWidth ? canvas.width / canvas.clientWidth : 1;
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        return context;
+    };
+
+    const paintSyncCursor = chart => {
+        const context = cursorLayer(chart);
+        const cursor = chart.$syncCursor;
+        if (!context || !cursor) return;
             const x = chart.scales.x.getPixelForValue(cursor.value);
             if (!Number.isFinite(x) || x < chart.chartArea.left || x > chart.chartArea.right) return;
-            const context = chart.ctx;
             context.save();
             context.beginPath();
             context.moveTo(x, chart.chartArea.top);
@@ -378,17 +537,7 @@ window.gpuCharts = (() => {
                 const meta = chart.getDatasetMeta(datasetIndex);
                 if (meta.hidden || !meta.data?.length) return;
                 let pointIndex = cursor.value;
-                if (cursor.mode === "value") {
-                    let bestDistance = Number.POSITIVE_INFINITY;
-                    pointIndex = -1;
-                    (dataset.data || []).forEach((point, index) => {
-                        const distance = Math.abs(Number(point?.x) - cursor.value);
-                        if (Number.isFinite(distance) && distance < bestDistance) {
-                            bestDistance = distance;
-                            pointIndex = index;
-                        }
-                    });
-                }
+                if (cursor.mode === "value") pointIndex = nearestByX(dataset.data || [], cursor.value);
                 const element = meta.data[pointIndex];
                 if (!element || !Number.isFinite(element.x) || !Number.isFinite(element.y)) return;
                 context.beginPath();
@@ -439,41 +588,87 @@ window.gpuCharts = (() => {
                 });
             }
             context.restore();
+    };
+
+    // Keeps the cursor layer aligned after Chart.js re-renders (resize, zoom, data changes).
+    const syncCursorPlugin = {
+        id: "syncCursor",
+        afterRender(chart) {
+            if (chart.$cursorLayer || chart.$syncCursor) paintSyncCursor(chart);
         },
     };
 
     const clearSyncGroup = groupId => {
         const group = syncGroups[groupId];
         if (!group) return;
-        group.members.forEach(member => {
-            member.canvas.removeEventListener("pointermove", member.move);
-            member.canvas.removeEventListener("pointerleave", member.leave);
-            if (member.chart) {
-                member.chart.$syncCursor = null;
-                member.chart.draw();
-            }
+        (group.listeners || []).forEach(listener => {
+            listener.target.removeEventListener("pointermove", listener.move);
+            listener.target.removeEventListener("pointerleave", listener.leave);
+        });
+        // Charts may already have been destroyed and replaced by a re-render.
+        (group.charts || []).forEach(chart => {
+            if (!chart?.ctx) return;
+            chart.$syncCursor = null;
+            paintSyncCursor(chart);
         });
         group.readout?.classList.remove("show");
         delete syncGroups[groupId];
     };
 
-    const updateMainSyncReadout = (readout, charts, index) => {
-        if (!readout) return;
-        readout.replaceChildren();
-        const heading = document.createElement("strong");
-        heading.textContent = charts[0]?.data?.labels?.[index] || `Sample ${index + 1}`;
-        readout.appendChild(heading);
-        const values = document.createElement("div");
-        values.className = "sync-values";
+    // Gives every chart in a group the same y-axis width so their plot areas line up vertically:
+    // the same horizontal pointer position then means the same time on every chart.
+    const fixedYAxisWidth = scale => {
+        if (scale.chart.$yAxisWidth) scale.width = scale.chart.$yAxisWidth;
+    };
+
+    const alignYAxes = charts => {
+        const width = Math.max(...charts.map(chart => chart.scales.y?.width || 0));
         charts.forEach(chart => {
+            chart.$yAxisWidth = width;
+            chart.update("none");
+        });
+    };
+
+    // One pointer listener on the charts' shared container keeps the cursor steady while the pointer
+    // crosses the gaps and titles between charts; it is hidden only when the pointer leaves the container.
+    const listenForSync = (group, container, onMove, onLeave) => {
+        const move = event => onMove(event);
+        const leave = () => onLeave();
+        container.addEventListener("pointermove", move);
+        container.addEventListener("pointerleave", leave);
+        group.listeners = [{ target: container, move, leave }];
+        group.charts.forEach(chart => { chart.canvas.style.cursor = "crosshair"; });
+    };
+
+    // Converts a pointer position to an x value using the first chart; the others share the same plot area.
+    const pointerValue = (chart, clientX) => {
+        const rect = chart.canvas.getBoundingClientRect();
+        const pixel = Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, clientX - rect.left));
+        return Number(chart.scales.x.getValueForPixel(pixel));
+    };
+    // Builds the readout chips once per group and only updates their text afterwards.
+    const updateMainSyncReadout = (group, index) => {
+        const { readout, charts } = group;
+        if (!readout) return;
+        if (!group.chips) {
+            readout.replaceChildren();
+            group.heading = document.createElement("strong");
+            const values = document.createElement("div");
+            values.className = "sync-values";
+            group.chips = charts.map(chart => {
+                const chip = document.createElement("span");
+                chip.style.setProperty("--sync-color", chart.data.datasets[0]?.borderColor || "#38bdf8");
+                values.appendChild(chip);
+                return chip;
+            });
+            readout.append(group.heading, values);
+        }
+        group.heading.textContent = charts[0]?.data?.labels?.[index] || `Sample ${index + 1}`;
+        charts.forEach((chart, chartIndex) => {
             const dataset = chart.data.datasets[0];
             const numeric = Number(dataset?.data?.[index]);
-            const chip = document.createElement("span");
-            chip.style.setProperty("--sync-color", dataset?.borderColor || "#38bdf8");
-            chip.textContent = `${dataset?.label || "Metric"}: ${Number.isFinite(numeric) ? numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-"}`;
-            values.appendChild(chip);
+            group.chips[chartIndex].textContent = `${dataset?.label || "Metric"}: ${Number.isFinite(numeric) ? numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-"}`;
         });
-        readout.appendChild(values);
         readout.classList.add("show");
     };
 
@@ -482,26 +677,22 @@ window.gpuCharts = (() => {
         const charts = chartIds.map(id => instances[id]).filter(Boolean);
         const readout = document.getElementById(readoutId);
         if (charts.length < 2) return;
-        const members = charts.map(chart => {
-            const canvas = chart.canvas;
-            const move = event => {
-                const rect = canvas.getBoundingClientRect();
-                const pixel = Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, event.clientX - rect.left));
-                const index = Math.max(0, Math.min(chart.data.labels.length - 1, Math.round(chart.scales.x.getValueForPixel(pixel))));
-                charts.forEach(item => { item.$syncCursor = { mode: "index", value: index }; item.draw(); });
-                updateMainSyncReadout(readout, charts, index);
-            };
-            const leave = () => {
-                charts.forEach(item => { item.$syncCursor = null; item.draw(); });
-                readout?.classList.remove("show");
-            };
-            canvas.addEventListener("pointermove", move);
-            canvas.addEventListener("pointerleave", leave);
-            return { chart, canvas, move, leave };
+        alignYAxes(charts);
+        const group = { readout, charts, listeners: [], index: -1 };
+        const show = perFrame(index => {
+            if (index === group.index) return;
+            group.index = index;
+            charts.forEach(item => { item.$syncCursor = index < 0 ? null : { mode: "index", value: index }; paintSyncCursor(item); });
+            if (index < 0) readout?.classList.remove("show");
+            else updateMainSyncReadout(group, index);
         });
-        syncGroups[groupId] = { members, readout };
+        const first = charts[0];
+        const container = first.canvas.closest(".chart-grid") || first.canvas.parentElement;
+        listenForSync(group, container,
+            event => show(Math.max(0, Math.min(first.data.labels.length - 1, Math.round(pointerValue(first, event.clientX))))),
+            () => show(-1));
+        syncGroups[groupId] = group;
     };
-
     const clampZoomWindow = (requestedMin, requestedMax, fullMin, fullMax, minimumWidth) => {
         const fullWidth = fullMax - fullMin;
         if (!Number.isFinite(fullWidth) || fullWidth <= 0)
@@ -511,59 +702,42 @@ window.gpuCharts = (() => {
         return { min, max: min + width };
     };
 
-    const attachExpandedZoom = (id, kind) => {
+    const attachExpandedZoom = id => {
         const chart = instances[id];
         const canvas = chart?.canvas;
         const xScale = chart?.scales?.x;
         if (!chart || !canvas || !xScale) return;
 
         const fullX = { min: Number(xScale.min), max: Number(xScale.max) };
-        const yScale = chart.scales.y;
-        const fullY = yScale ? { min: Number(yScale.min), max: Number(yScale.max) } : null;
-        const minimumXWidth = kind === "line"
-            ? Math.min(2, Math.max(1, fullX.max - fullX.min))
-            : Math.max((fullX.max - fullX.min) * 0.01, Number.EPSILON);
-        const minimumYWidth = fullY
-            ? Math.max((fullY.max - fullY.min) * 0.01, Number.EPSILON)
-            : 0;
+        const minimumXWidth = Math.min(2, Math.max(1, fullX.max - fullX.min));
+        let pendingFactor = 1;
+        let pendingCenter = null;
+
+        // Wheel ticks arriving within one frame are combined into a single zoom and redraw.
+        const apply = perFrame(() => {
+            const currentX = {
+                min: Number(chart.options.scales.x.min ?? chart.scales.x.min),
+                max: Number(chart.options.scales.x.max ?? chart.scales.x.max),
+            };
+            const nextX = clampZoomWindow(
+                pendingCenter - (pendingCenter - currentX.min) * pendingFactor,
+                pendingCenter + (currentX.max - pendingCenter) * pendingFactor,
+                fullX.min,
+                fullX.max,
+                minimumXWidth);
+            pendingFactor = 1;
+            chart.options.scales.x.min = nextX.min;
+            chart.options.scales.x.max = nextX.max;
+            chart.update("none");
+        });
 
         const wheel = event => {
             event.preventDefault();
             const rect = canvas.getBoundingClientRect();
             const pointerX = Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, event.clientX - rect.left));
-            const pointerY = Math.max(chart.chartArea.top, Math.min(chart.chartArea.bottom, event.clientY - rect.top));
-            const centerX = chart.scales.x.getValueForPixel(pointerX);
-            const currentX = {
-                min: Number(chart.options.scales.x.min ?? chart.scales.x.min),
-                max: Number(chart.options.scales.x.max ?? chart.scales.x.max),
-            };
-            const factor = event.deltaY < 0 ? 0.72 : 1.4;
-            const nextX = clampZoomWindow(
-                centerX - (centerX - currentX.min) * factor,
-                centerX + (currentX.max - centerX) * factor,
-                fullX.min,
-                fullX.max,
-                minimumXWidth);
-            chart.options.scales.x.min = nextX.min;
-            chart.options.scales.x.max = nextX.max;
-
-            if (kind === "scatter" && fullY && chart.scales.y) {
-                const centerY = chart.scales.y.getValueForPixel(pointerY);
-                const currentY = {
-                    min: Number(chart.options.scales.y.min ?? chart.scales.y.min),
-                    max: Number(chart.options.scales.y.max ?? chart.scales.y.max),
-                };
-                const nextY = clampZoomWindow(
-                    centerY - (centerY - currentY.min) * factor,
-                    centerY + (currentY.max - centerY) * factor,
-                    fullY.min,
-                    fullY.max,
-                    minimumYWidth);
-                chart.options.scales.y.min = nextY.min;
-                chart.options.scales.y.max = nextY.max;
-            }
-
-            chart.update("none");
+            pendingCenter = chart.scales.x.getValueForPixel(pointerX);
+            pendingFactor *= event.deltaY < 0 ? 0.72 : 1.4;
+            apply();
         };
 
         expandedZoomStates[id] = { canvas, wheel };
@@ -579,54 +753,18 @@ window.gpuCharts = (() => {
         const render = () => {
             destroy(modalCanvasId);
             if (cached.kind === "line") {
-                renderLine(modalCanvasId, cached.labels, cached.data, cached.label, cached.color);
-            } else if (cached.kind === "scatter") {
-                renderScatter(modalCanvasId, cached.points, cached.xLabel, cached.yLabel, cached.color);
+                renderLine(modalCanvasId, cached.labels, cached.data, cached.label, cached.color, cached.threshold, true);
             } else if (cached.kind === "timeline") {
-                renderTimeline(modalCanvasId, cached.segments, cached.title);
+                renderTimeline(modalCanvasId, cached.segments, cached.title, cached.highlights);
             }
             if (instances[modalCanvasId]) {
                 instances[modalCanvasId].resize();
-                if (cached.kind === "line" || cached.kind === "scatter")
-                    attachExpandedZoom(modalCanvasId, cached.kind);
+                if (cached.kind === "line") attachExpandedZoom(modalCanvasId);
             }
         };
         requestAnimationFrame(() => requestAnimationFrame(render));
     };
-
-    const renderScatter = (id, points, xLabel, yLabel, color) => {
-        if (!ensureChartJs()) return;
-        const ctx = document.getElementById(id);
-        if (!ctx) return;
-        destroy(id);
-        cache[id] = { kind: "scatter", points, xLabel, yLabel, color };
-        instances[id] = new Chart(ctx, {
-            type: "scatter",
-            data: {
-                datasets: [
-                    {
-                        label: `${yLabel || "Y"} vs ${xLabel || "X"}`,
-                        data: points,
-                        backgroundColor: color || "rgba(52,211,153,0.6)",
-                        borderColor: color || "#34d399",
-                        pointRadius: 3,
-                    },
-                ],
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: { mode: "nearest", intersect: false },
-                plugins: { legend: { display: true } },
-                scales: {
-                    x: { title: { display: true, text: xLabel || "X" } },
-                    y: { title: { display: true, text: yLabel || "Y" } },
-                },
-            },
-        });
-    };
-
-    const renderTimeline = (id, segments, title) => {
+    const renderTimeline = (id, segments, title, highlights) => {
         if (!ensureChartJs()) return;
         const ctx = document.getElementById(id);
         if (!ctx) return;
@@ -643,7 +781,7 @@ window.gpuCharts = (() => {
         }));
         if (!normalized.length) return;
 
-        cache[id] = { kind: "timeline", segments, title };
+        cache[id] = { kind: "timeline", segments, title, highlights };
         const inspector = ensureTimelineInspector(id, ctx);
         const labels = [...new Set(normalized.map(segment => segment.label))];
         const fullMax = Math.max(...normalized.map(segment => segment.endSeconds));
@@ -652,6 +790,7 @@ window.gpuCharts = (() => {
             chart: null,
             inspector,
             segments: normalized,
+            highlights: normalizeHighlights(highlights),
             title,
             boundaries: [...new Set(normalized.flatMap(segment => [segment.startSeconds, segment.endSeconds]))]
                 .sort((left, right) => left - right),
@@ -692,14 +831,8 @@ window.gpuCharts = (() => {
                 maintainAspectRatio: false,
                 animation: false,
                 layout: { padding: { top: 4, right: 6, bottom: 0, left: 2 } },
-                interaction: { mode: "nearest", axis: "x", intersect: false },
-                onHover: (event, _elements, activeChart) => {
-                    if (!Number.isFinite(event.x)) return;
-                    const { left, right } = activeChart.chartArea;
-                    const cursorX = Math.max(left, Math.min(right, event.x));
-                    const seconds = activeChart.scales.x.getValueForPixel(cursorX);
-                    setTimelineCursor(state, seconds, false, event.y);
-                },
+                // Hover, drag and wheel are handled by attachTimelineInteractions (once per frame) instead of Chart.js events.
+                events: [],
                 plugins: {
                     legend: { display: false },
                     tooltip: { enabled: false },
@@ -738,8 +871,10 @@ window.gpuCharts = (() => {
                     },
                 },
             },
-            plugins: [timelineCursorPlugin],
+            plugins: [inRangeShadePlugin, timelineCursorPlugin],
         });
+        chart.$inRangeWindows = state.highlights;
+        chart.update("none");
         instances[id] = chart;
         state.chart = chart;
         timelineStates[id] = state;
@@ -803,6 +938,7 @@ window.gpuCharts = (() => {
                         pointHoverRadius: 3,
                         tension: 0.18,
                         fill: false,
+                        ...thresholdDatasetStyle(source.threshold, source.color || "#3b82f6"),
                     }],
                 },
                 options: {
@@ -821,40 +957,10 @@ window.gpuCharts = (() => {
                             ...reportScaleStyle(null),
                             ticks: { ...reportScaleStyle(null).ticks, autoSkip: true, maxTicksLimit: 11 },
                         },
-                        y: reportScaleStyle(null),
+                        y: { ...reportScaleStyle(null), ...thresholdScale(source.threshold) },
                     },
                 },
-                plugins: [reportBackgroundPlugin],
-            };
-        } else if (source.kind === "scatter") {
-            config = {
-                type: "scatter",
-                data: {
-                    datasets: [{
-                        label: `${source.yLabel || "Y"} vs ${source.xLabel || "X"}`,
-                        data: source.points,
-                        backgroundColor: source.color || "#a855f7",
-                        borderColor: source.color || "#a855f7",
-                        pointRadius: 5,
-                    }],
-                },
-                options: {
-                    responsive: false,
-                    animation: false,
-                    devicePixelRatio: 1,
-                    layout: { padding: { top: 18, right: 28, bottom: 10, left: 12 } },
-                    plugins: {
-                        legend: {
-                            display: true,
-                            labels: { color: "#0f172a", font: { size: 22, weight: "600" }, boxWidth: 42, padding: 18 },
-                        },
-                    },
-                    scales: {
-                        x: reportScaleStyle(source.xLabel || "X"),
-                        y: reportScaleStyle(source.yLabel || "Y"),
-                    },
-                },
-                plugins: [reportBackgroundPlugin],
+                plugins: [reportBackgroundPlugin, thresholdPlugin],
             };
         } else if (source.kind === "timeline") {
             const normalized = (source.segments || []).map((segment, index) => ({
@@ -907,13 +1013,23 @@ window.gpuCharts = (() => {
                         },
                     },
                 },
-                plugins: [reportBackgroundPlugin],
+                plugins: [reportBackgroundPlugin, inRangeShadePlugin],
             };
         } else {
             return null;
         }
 
         const chart = new Chart(canvas, config);
+        if (source.kind === "line") {
+            chart.$threshold = source.threshold;
+            chart.$reportScale = true;
+            chart.update("none");
+        }
+        if (source.kind === "timeline") {
+            chart.$inRangeWindows = normalizeHighlights(source.highlights);
+            chart.$inRangeColor = "rgba(34,197,94,0.18)";
+            chart.update("none");
+        }
         chart.draw();
         const result = { data: canvas.toDataURL("image/png"), width: canvas.width, height: canvas.height };
         chart.destroy();
@@ -935,6 +1051,7 @@ window.gpuCharts = (() => {
             title: { display: true, text: yTitle, color: "#94a3b8" },
             ticks: { color: "#94a3b8" },
             grid: { color: "rgba(148,163,184,.12)" },
+            afterFit: fixedYAxisWidth,
         },
     });
 
@@ -950,10 +1067,11 @@ window.gpuCharts = (() => {
             })).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y)),
             borderColor: run.color,
             backgroundColor: run.color,
-            borderWidth: 2,
+            borderWidth: 1.5,
             pointRadius: 0,
-            pointHoverRadius: 3,
-            tension: .12,
+            pointHoverRadius: 0,
+            tension: 0,
+            spanGaps: true,
         }));
         instances[id] = new Chart(canvas, {
             type: "line",
@@ -963,7 +1081,8 @@ window.gpuCharts = (() => {
                 maintainAspectRatio: false,
                 animation: false,
                 normalized: true,
-                interaction: { mode: "nearest", intersect: false },
+                // Only legend clicks; hover is drawn by the synced cursor once per frame.
+                events: ["click"],
                 plugins: {
                     legend: { labels: { color: "#cbd5e1", usePointStyle: true, pointStyle: "line" } },
                     tooltip: { enabled: false },
@@ -1018,7 +1137,7 @@ window.gpuCharts = (() => {
                 },
                 scales: {
                     x: comparisonScales(commonMax, "").x,
-                    y: { ticks: { color: "#cbd5e1" }, grid: { display: false }, stacked: true },
+                    y: { ticks: { color: "#cbd5e1" }, grid: { display: false }, stacked: true, afterFit: fixedYAxisWidth },
                 },
             },
             plugins: [syncCursorPlugin],
@@ -1051,24 +1170,19 @@ window.gpuCharts = (() => {
             renderComparisonLine("comparison-memory-clock", runs, "memoryClock", "Memory clock (MHz)", commonMax),
             renderComparisonCapping("comparison-capping", runs, commonMax),
         ].filter(Boolean);
-        const members = charts.map(chart => {
-            const canvas = chart.canvas;
-            const move = event => {
-                const rect = canvas.getBoundingClientRect();
-                const pixel = Math.max(chart.chartArea.left, Math.min(chart.chartArea.right, event.clientX - rect.left));
-                const elapsed = Math.max(0, Math.min(commonMax, Number(chart.scales.x.getValueForPixel(pixel)) || 0));
-                charts.forEach(item => { item.$syncCursor = { mode: "value", value: elapsed }; item.draw(); });
-            };
-            const leave = () => {
-                charts.forEach(item => { item.$syncCursor = null; item.draw(); });
-            };
-            canvas.addEventListener("pointermove", move);
-            canvas.addEventListener("pointerleave", leave);
-            canvas.style.cursor = "crosshair";
-            return { chart, canvas, move, leave };
+        const show = perFrame(elapsed => {
+            charts.forEach(item => { item.$syncCursor = elapsed === null ? null : { mode: "value", value: elapsed }; paintSyncCursor(item); });
         });
-        syncGroups.comparison = { members };
+        if (!charts.length) return;
+        alignYAxes(charts);
+        const group = { charts, listeners: [] };
+        const first = charts[0];
+        const container = first.canvas.closest("section") || first.canvas.parentElement;
+        listenForSync(group, container,
+            event => show(Math.max(0, Math.min(commonMax, pointerValue(first, event.clientX) || 0))),
+            () => show(null));
+        syncGroups.comparison = group;
     };
 
-    return { renderLine, renderScatter, renderTimeline, timelineCommand, createMainSyncGroup, renderComparison, exportImage, destroy, openModalFrom };
+    return { renderLine, renderTimeline, timelineCommand, createMainSyncGroup, renderComparison, exportImage, destroy, openModalFrom };
 })();

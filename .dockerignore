@@ -5,7 +5,13 @@
 bin
 obj
 publish
+publish.zip
 .codex-build-out
+.codex-artifacts
+.codex-release
+reports
+samples
+TestResults
 *.user
 *.suo
 *.cache

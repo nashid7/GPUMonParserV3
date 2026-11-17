@@ -215,9 +215,21 @@ window.gpuExport = (() => {
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(8);
         pdf.setTextColor(...palette.muted);
-        pdf.text(`Generated ${new Date().toLocaleString()}`, 14, 44);
+        pdf.text(`${value(read(report, "SourceFile"))} · Generated ${new Date().toLocaleString()}`, 14, 44, { maxWidth: 182 });
+        pdf.text(value(read(report, "Settings")), 14, 48.5, { maxWidth: 182 });
 
-        let y = drawOverviewCards(pdf, report, 50);
+        let y = drawOverviewCards(pdf, report, 53);
+        const warning = read(report, "Warning");
+        if (warning) {
+            pdf.setFillColor(254, 243, 199);
+            pdf.setDrawColor(245, 158, 11);
+            pdf.roundedRect(14, y - 2, 182, 9, 1.5, 1.5, "FD");
+            pdf.setFont("helvetica", "bold");
+            pdf.setFontSize(8);
+            pdf.setTextColor(146, 64, 14);
+            pdf.text(`Warning: ${warning}`, 17, y + 3.6, { maxWidth: 176 });
+            y += 12;
+        }
         y = sectionTitle(pdf, "Test identity", "Source and GPU configuration used for this report.", y);
         const identity = [
             { field: "Source file", value: value(read(report, "SourceFile")) },
@@ -225,8 +237,9 @@ window.gpuExport = (() => {
             { field: "GPU", value: value(read(report, "BrandName")) },
             { field: "VBIOS", value: value(read(report, "VbiosVersion")) },
             { field: "Driver", value: value(read(report, "DriverVersion")) },
+            { field: "Tool version", value: value(read(report, "ToolVersion")) },
             { field: "Utilization column", value: value(read(report, "UtilColumn")) },
-            { field: "Power column", value: value(read(report, "PowerColumn")) },
+            { field: "TGP column", value: value(read(report, "PowerColumn")) },
         ];
         y = addTable(pdf, identity, y, [
             { header: "Field", key: "field" },
@@ -237,7 +250,7 @@ window.gpuExport = (() => {
         const metrics = [
             ["GPU temperature", "C", "GpuTjMin", "GpuTjAvg", "GpuTjMax"],
             ["Memory temperature", "C", "MemTjMin", "MemTjAvg", "MemTjMax"],
-            ["Power", "W", "PowerMin", "PowerAvg", "PowerMax"],
+            ["TGP", "W", "PowerMin", "PowerAvg", "PowerMax"],
             ["GPC clock", "MHz", "GpcClockMin", "GpcClockAvg", "GpcClockMax"],
             ["Memory clock", "MHz", "MemoryClockMin", "MemoryClockAvg", "MemoryClockMax"],
         ].map(metric => ({
@@ -255,12 +268,40 @@ window.gpuExport = (() => {
             { header: "Maximum", key: "maximum" },
         ], { columnStyles: { metric: { cellWidth: 50 }, unit: { cellWidth: 20 } } });
 
+        y = sectionTitle(pdf, "TGP requirement", `PASS when at least ${value(read(report, "TgpRequired"))}% of TGP samples within ${value(read(report, "Filter"))} utilization are >= ${value(read(report, "TgpExpected"))} W.`, y);
+        const verdict = value(read(report, "TgpVerdict"));
+        const short = Number(read(report, "TgpSamplesShort")) || 0;
+        y = addTable(pdf, [{
+            verdict,
+            expected: `${value(read(report, "TgpExpected"))} W`,
+            required: `${value(read(report, "TgpRequired"))}%`,
+            achieved: value(read(report, "TgpPercent")),
+            samples: `${number(read(report, "TgpAtOrAbove"))} / ${number(read(report, "TgpSamples"))}`,
+            passing: value(read(report, "TgpPassingWatts")),
+            short: short > 0 ? number(short) : "-",
+        }], y, [
+            { header: "Result", key: "verdict" },
+            { header: "Expected TGP", key: "expected" },
+            { header: "Required", key: "required" },
+            { header: "Achieved", key: "achieved" },
+            { header: "Samples >= expected", key: "samples" },
+            { header: "Would pass up to", key: "passing" },
+            { header: "Samples short", key: "short" },
+        ], {
+            didParseCell: data => {
+                if (data.section !== "body" || data.column.dataKey !== "verdict") return;
+                data.cell.styles.fontStyle = "bold";
+                data.cell.styles.textColor = palette.white;
+                data.cell.styles.fillColor = verdict === "PASS" ? [22, 163, 74] : verdict === "FAIL" ? [220, 38, 38] : palette.muted;
+            },
+        });
+
         const stateRows = normalizeStateRows(pStates);
         const cappingRows = normalizeCappingRows(capping);
         if (stateRows.length || cappingRows.length) {
             pdf.addPage("a4", "portrait");
-            drawHeader(pdf, "Full-test activity");
-            y = sectionTitle(pdf, "Full-test activity", "State and capping counts use every sample in the complete test, independent of the utilization filter.", 36);
+            drawHeader(pdf, "In-range activity");
+            y = sectionTitle(pdf, "In-range activity", `State and capping counts use only samples within the ${value(read(report, "Filter"))} utilization range.`, 36);
             if (stateRows.length) {
                 pdf.setFont("helvetica", "bold");
                 pdf.setFontSize(9);
@@ -284,12 +325,11 @@ window.gpuExport = (() => {
         }
 
         const performanceCharts = [
+            { id: "chart-power", label: "TGP (dashed line = expected TGP; red = below expected)" },
             { id: "chart-gpu", label: "GPU temperature" },
             { id: "chart-memory", label: "Memory temperature" },
-            { id: "chart-power", label: "Power" },
             { id: "chart-gpc-clock", label: "GPC clock" },
             { id: "chart-memory-clock", label: "Memory clock" },
-            { id: "chart-scatter", label: "Power versus GPU temperature" },
         ].filter(chart => document.getElementById(chart.id));
         if (performanceCharts.length) {
             pdf.addPage("a4", "portrait");
@@ -305,8 +345,8 @@ window.gpuExport = (() => {
             }
         }
 
-        addTimelinePage(pdf, "chart-pstate-timeline", "P-State timeline", "Continuous state periods across the complete test.");
-        addTimelinePage(pdf, "chart-capping-timeline", "Capping timeline", "Active capping reasons and overlaps across the complete test.");
+        addTimelinePage(pdf, "chart-pstate-timeline", "P-State timeline", "Continuous state periods across the complete test. Green shading marks samples within the utilization range.");
+        addTimelinePage(pdf, "chart-capping-timeline", "Capping timeline", "Active capping reasons across the complete test. Green shading marks samples within the utilization range.");
 
         drawFooter(pdf);
         pdf.save(filename || "gpu-log-report.pdf");

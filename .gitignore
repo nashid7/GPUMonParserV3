@@ -1,13 +1,26 @@
+# .NET build and publish output
 bin/
 obj/
 publish/
+/publish.zip
+
+# Test and coverage output
+TestResults/
+coverage/
+coverage.*
+
+# Local tooling output
 .codex-build-out/
 .codex-artifacts/
 .codex-release/
-samplelogs/
+
+# IDE and user-specific files
 .vs/
 .vscode/
 *.user
 *.suo
 *.cache
 *.log
+
+# Generated report exports; keep the Markdown/HTML sources
+/reports/*.pdf
