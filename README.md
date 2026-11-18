@@ -16,11 +16,22 @@ A .NET 9 Blazor application for analyzing NVIDIA GPU Monitor CSV exports.
 - **Presets:** save a combination of utilization range, expected TGP and required % per project.
   - A preset can include a file-name prefix (e.g. `163L`) so it is applied automatically to matching logs.
   - Presets and your last manual settings are stored in the browser.
+- **Project limits (optional):** GPU temperature average ≤ X °C, memory temperature maximum ≤ Y °C, and thermocouple average ≤ Z °C.
+  - Set them under **Add limits** in the settings bar; they are saved with presets. A blank limit is not checked.
+  - When limits are set, the result badge shows the **overall** PASS/FAIL (TGP and every limit), with each check listed beside it.
+  - A TC limit without a PicoLog is shown as not evaluated and does not fail the result.
+- **PicoLog thermocouples (optional):** drop the PicoLog .csv together with (or after) the GPUMON log.
+  - Channels are read by name (e.g. `#1_Top_Left Last (C)`); any channel whose name contains "chamber" is the chamber temperature, all others are thermocouples.
+  - Each GPUMON sample inside the utilization range is matched to the PicoLog reading at the same second (±1 s). The PicoLog timezone offset is ignored because GPUMON logs local time.
+  - Shows each TC's min/avg/max, the average of all TCs (chamber excluded) and the chamber separately, plus a TC chart synced with the other charts.
+  - Warns when the PicoLog does not overlap, or only partly overlaps, the in-range GPUMON samples.
+- **Test timeline:** every result shows when the GPUMON log was recorded, when FurMark was loading the GPU (first to last sample within the utilization range, with total in-range time when utilization dipped) and when the PicoLog was recorded. A small bar shows them on one time scale. The same times are in the copied summary, the PDF, the Batch table/CSV (log, load and PicoLog start/end, load duration, periods) and Compare.
 - **Reliability warning** when fewer than 100 samples fall inside the utilization range.
 - **Batch:** drop many logs at once to get a PASS/FAIL table for every unit.
   - Each file uses its matching preset.
+  - PicoLog files dropped with them are paired automatically with the GPUMON log they overlap in time; unmatched PicoLogs are listed.
   - The table exports to CSV, and any row opens on the Analyze page.
-- **Compare:** two to four runs on a shared elapsed-time scale, with per-run TGP PASS/FAIL. Results update automatically.
+- **Compare:** two to four runs on a shared elapsed-time scale, with per-run TGP PASS/FAIL, overall result when limits are set, and TC averages when a run has a PicoLog. Results update automatically.
 - **Traceability:** the file name and settings are included in the copied summary and the PDF report.
 - **Engineering PDF export.**
 
@@ -51,10 +62,19 @@ dotnet run
 
 Open `http://localhost:5200/productDev/Tools/gpuMonLogParser`.
 
+## Tests
+
+```bash
+dotnet test tests/par.Tests
+```
+
+The tests build small synthetic GPUMON and PicoLog files, so they need no real logs. `RealSampleTests` also checks results against independently calculated values when the internal `samples/` folder is present and does nothing otherwise. The GitHub Actions workflow runs the tests on every push. `nuget.config` restricts package restore to nuget.org.
+
 ## Repository layout
 
 - `Components/` contains the Blazor UI: the Analyze, Batch and Compare pages, plus shared components such as the settings/preset bar (`Components/Shared/AnalysisSettingsBar.razor`).
-- `Services/` contains the shared GPUMON log parser/analyzer (`GpuMonLogAnalyzer`) used by every page, the analysis settings/preset model, and the log hand-off used to open Batch results on the Analyze page.
+- `Services/` contains the shared GPUMON log parser/analyzer (`GpuMonLogAnalyzer`), the PicoLog parser and time matching (`PicoLog.cs`), the overall PASS/FAIL evaluation (`ProjectChecks`), the analysis settings/preset model, and the log hand-off used to open Batch results on the Analyze page.
+- `tests/par.Tests/` contains the xUnit regression tests (not part of the published app).
 - `wwwroot/` contains the browser-side chart, clipboard, export, and styling assets.
 - `samples/` contains representative GPUMON CSV fixtures for manual and regression testing.
 - `reports/` contains the human-readable calculation audits. PDF exports are intentionally not versioned.

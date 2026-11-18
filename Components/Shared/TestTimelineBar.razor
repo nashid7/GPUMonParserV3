@@ -1,0 +1,60 @@
+@using par.Services
+
+<div class="test-timeline">
+    <div class="tl-items">
+        <div class="tl-item">
+            <span>GPUMON log recorded</span>
+            <b>@TestTimeline.Range(Timeline.LogStart, Timeline.LogEnd)</b>
+            <em>@TestTimeline.Span(Timeline.LogDuration)</em>
+        </div>
+        <div class="tl-item load">
+            <span>FurMark load · GPU utilization @Timeline.UtilizationRange</span>
+            <b>@TestTimeline.Range(Timeline.LoadStart, Timeline.LoadEnd)</b>
+            <em>@TestTimeline.Span(Timeline.LoadDuration)@(Timeline.HasDips ? $" · {TestTimeline.Span(Timeline.TimeInRange)} in range over {Timeline.LoadPeriods} periods" : "")</em>
+        </div>
+        @if (Timeline.PicoStart is not null)
+        {
+            <div class="tl-item pico">
+                <span>PicoLog recorded</span>
+                <b>@TestTimeline.Range(Timeline.PicoStart, Timeline.PicoEnd)</b>
+                <em>@TestTimeline.Span(Timeline.PicoEnd - Timeline.PicoStart)@(PicoMatched is null ? "" : $" · {PicoMatched}")</em>
+            </div>
+        }
+    </div>
+    <div class="tl-bar" title="Whole GPUMON log; green = GPU under load in range@(Timeline.PicoBar is null ? "" : "; purple = PicoLog coverage")">
+        @foreach (var (start, end) in Timeline.LoadBars)
+        {
+            <i class="load" style="@Position(start, end)"></i>
+        }
+        @if (Timeline.PicoBar is { } pico)
+        {
+            <i class="pico" style="@Position(pico.Start, pico.End)"></i>
+        }
+    </div>
+    <div class="tl-scale"><span>@TestTimeline.Clock(Timeline.LogStart)</span><span>@TestTimeline.Clock(Timeline.LogEnd)</span></div>
+</div>
+
+<style>
+    .test-timeline{margin-top:12px;padding:10px 14px 8px;border:1px solid #1f2d4a;border-radius:12px;background:#0d1729}
+    .tl-items{display:flex;flex-wrap:wrap;gap:6px 28px}
+    .tl-item{display:flex;flex-direction:column;min-width:0}
+    .tl-item span{color:#94a3b8;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+    .tl-item span::before{content:"";display:inline-block;width:8px;height:8px;margin-right:6px;border-radius:2px;background:#334766;vertical-align:0}
+    .tl-item.load span::before{background:#22c55e}
+    .tl-item.pico span::before{background:#a78bfa}
+    .tl-item b{color:#f8fafc;font-size:.92rem;font-variant-numeric:tabular-nums}
+    .tl-item em{color:#cbd5e1;font-style:normal;font-size:.78rem}
+    .tl-bar{position:relative;height:14px;margin-top:10px;border-radius:4px;background:#1a2741;overflow:hidden}
+    .tl-bar i{position:absolute}
+    .tl-bar i.load{top:0;height:9px;background:#22c55e}
+    .tl-bar i.pico{bottom:0;height:4px;background:#a78bfa}
+    .tl-scale{display:flex;justify-content:space-between;margin-top:2px;color:#64748b;font-size:.68rem;font-variant-numeric:tabular-nums}
+</style>
+
+@code {
+    [Parameter, EditorRequired] public TestTimeline Timeline { get; set; } = default!;
+    [Parameter] public string? PicoMatched { get; set; }
+
+    private static string Position(double start, double end)
+        => FormattableString.Invariant($"left:{start * 100:0.###}%;width:{Math.Max((end - start) * 100, 0.15):0.###}%");
+}

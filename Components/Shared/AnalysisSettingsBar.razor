@@ -37,6 +37,9 @@
         </div>
     </label>
     <div class="setting-links">
+        <button type="button" class="link-button @(Settings.HasLimits ? "active" : "")" @onclick="() => _showLimits = !_showLimits" aria-expanded="@_showLimits">
+            @(Settings.HasLimits ? $"Limits: {LimitsSummary}" : "Add limits") @(_showLimits ? "▴" : "▾")
+        </button>
         @if (_editing is null)
         {
             <button type="button" class="link-button" @onclick="StartSaving">Save as preset</button>
@@ -47,6 +50,31 @@
         }
     </div>
 </div>
+
+@if (_showLimits)
+{
+    <div class="limits-editor">
+        <span class="limits-title">Project limits <small>(optional – leave blank to skip)</small></span>
+        <label class="setting">
+            <span>GPU temp average ≤</span>
+            <div class="setting-inputs">
+                <input type="number" step="0.1" aria-label="GPU temperature average limit" @bind="Settings.GpuTempAvgLimit" @bind:after="() => ChangedAsync(SettingsChange.Limits)" /><em>°C</em>
+            </div>
+        </label>
+        <label class="setting">
+            <span>Memory temp max ≤</span>
+            <div class="setting-inputs">
+                <input type="number" step="0.1" aria-label="Memory temperature maximum limit" @bind="Settings.MemTempMaxLimit" @bind:after="() => ChangedAsync(SettingsChange.Limits)" /><em>°C</em>
+            </div>
+        </label>
+        <label class="setting">
+            <span>TC average ≤ <small>(PicoLog)</small></span>
+            <div class="setting-inputs">
+                <input type="number" step="0.1" aria-label="Thermocouple average limit" @bind="Settings.TcAvgLimit" @bind:after="() => ChangedAsync(SettingsChange.Limits)" /><em>°C</em>
+            </div>
+        </label>
+    </div>
+}
 
 @if (_editing is not null)
 {
@@ -79,6 +107,11 @@
     .link-button{border:0;background:none;padding:0;color:#7dd3fc;font-size:.78rem;cursor:pointer}
     .link-button:hover{text-decoration:underline}
     .link-button.danger{color:#fca5a5}
+    .link-button.active{color:#fde68a}
+    .limits-editor{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 18px;margin-top:8px;padding:12px 14px;border:1px solid #223252;border-radius:12px;background:#0b1424}
+    .limits-editor .limits-title{flex-basis:100%;color:#cbd5e1;font-size:.78rem;font-weight:600}
+    .limits-editor small{color:#64748b;font-weight:400;text-transform:none;letter-spacing:0}
+    .limits-editor input{height:32px;width:80px;padding:4px 8px;border:1px solid #334766;border-radius:7px;background:#0a1323;color:#f8fafc;font-size:.86rem}
     .preset-editor{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 16px;margin-top:8px;padding:12px 14px;border:1px dashed #36527c;border-radius:12px;background:#0b1424}
     .preset-editor label{display:flex;flex-direction:column;gap:4px;margin:0;font-size:.72rem;color:#94a3b8}
     .preset-editor small{color:#64748b}
@@ -100,6 +133,14 @@
     private PresetDraft? _editing;
     private Task? _loading;
     private StoredValues? _beforeAutoApply;
+    private bool _showLimits;
+
+    private string LimitsSummary => string.Join(" · ", new[]
+    {
+        Settings.GpuTempAvgLimit is { } gpu ? $"GPU avg ≤ {Format(gpu)}" : null,
+        Settings.MemTempMaxLimit is { } mem ? $"Mem max ≤ {Format(mem)}" : null,
+        Settings.TcAvgLimit is { } tc ? $"TC avg ≤ {Format(tc)}" : null,
+    }.Where(part => part is not null));
 
     private IEnumerable<AnalysisPreset> AllPresets => BuiltInPresets.Concat(_userPresets);
     private AnalysisPreset? SelectedPreset => AllPresets.FirstOrDefault(preset => preset.Name == Settings.PresetName && Settings.Matches(preset))
@@ -113,12 +154,30 @@
     }
 
     private sealed record StoredSettings(List<AnalysisPreset>? Presets, StoredValues? Last);
-    private sealed record StoredValues(int UtilizationMin, int UtilizationMax, decimal ExpectedTgpWatts, decimal RequiredTgpPercent, string? PresetName);
+    private sealed record StoredValues(int UtilizationMin, int UtilizationMax, decimal ExpectedTgpWatts, decimal RequiredTgpPercent, string? PresetName,
+        decimal? GpuTempAvgLimit = null, decimal? MemTempMaxLimit = null, decimal? TcAvgLimit = null)
+    {
+        public static StoredValues From(AnalysisSettings settings) => new(settings.UtilizationMin, settings.UtilizationMax, settings.ExpectedTgpWatts,
+            settings.RequiredTgpPercent, settings.PresetName, settings.GpuTempAvgLimit, settings.MemTempMaxLimit, settings.TcAvgLimit);
+
+        public void ApplyTo(AnalysisSettings settings)
+        {
+            settings.UtilizationMin = UtilizationMin;
+            settings.UtilizationMax = UtilizationMax;
+            settings.ExpectedTgpWatts = ExpectedTgpWatts;
+            settings.RequiredTgpPercent = RequiredTgpPercent;
+            settings.PresetName = PresetName;
+            settings.GpuTempAvgLimit = GpuTempAvgLimit;
+            settings.MemTempMaxLimit = MemTempMaxLimit;
+            settings.TcAvgLimit = TcAvgLimit;
+        }
+    }
 
     private static string Format(decimal value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 
     private static string PresetLabel(AnalysisPreset preset)
         => $"{preset.Name} · {preset.UtilizationMin}–{preset.UtilizationMax}% · {Format(preset.ExpectedTgpWatts)} W · {Format(preset.RequiredTgpPercent)}%" +
+           (preset.GpuTempAvgLimit is null && preset.MemTempMaxLimit is null && preset.TcAvgLimit is null ? "" : " · + limits") +
            (string.IsNullOrWhiteSpace(preset.FilePrefix) ? "" : $" · auto for {preset.FilePrefix}*");
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -137,11 +196,7 @@
             _userPresets = stored.Presets ?? [];
             if (stored.Last is { } last)
             {
-                Settings.UtilizationMin = last.UtilizationMin;
-                Settings.UtilizationMax = last.UtilizationMax;
-                Settings.ExpectedTgpWatts = last.ExpectedTgpWatts;
-                Settings.RequiredTgpPercent = last.RequiredTgpPercent;
-                Settings.PresetName = last.PresetName;
+                last.ApplyTo(Settings);
                 await OnChanged.InvokeAsync(SettingsChange.Range);
             }
             StateHasChanged();
@@ -173,18 +228,14 @@
         {
             if (_beforeAutoApply is { } previous)
             {
-                Settings.UtilizationMin = previous.UtilizationMin;
-                Settings.UtilizationMax = previous.UtilizationMax;
-                Settings.ExpectedTgpWatts = previous.ExpectedTgpWatts;
-                Settings.RequiredTgpPercent = previous.RequiredTgpPercent;
-                Settings.PresetName = previous.PresetName;
+                previous.ApplyTo(Settings);
                 _beforeAutoApply = null;
                 StateHasChanged();
             }
             return null;
         }
         // Auto-applied presets are not saved as the remembered settings; only the user's own choices are.
-        _beforeAutoApply ??= new StoredValues(Settings.UtilizationMin, Settings.UtilizationMax, Settings.ExpectedTgpWatts, Settings.RequiredTgpPercent, Settings.PresetName);
+        _beforeAutoApply ??= StoredValues.From(Settings);
         Settings.Apply(match);
         StateHasChanged();
         return match.Name;
@@ -222,7 +273,8 @@
         if (BuiltInPresets.Any(preset => preset.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) name += " (custom)";
         var prefix = string.IsNullOrWhiteSpace(_editing.FilePrefix) ? null : _editing.FilePrefix.Trim();
         _userPresets.RemoveAll(preset => preset.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-        _userPresets.Add(new AnalysisPreset(name, prefix, Settings.UtilizationMin, Settings.UtilizationMax, Settings.ExpectedTgpWatts, Settings.RequiredTgpPercent));
+        _userPresets.Add(new AnalysisPreset(name, prefix, Settings.UtilizationMin, Settings.UtilizationMax, Settings.ExpectedTgpWatts, Settings.RequiredTgpPercent,
+            GpuTempAvgLimit: Settings.GpuTempAvgLimit, MemTempMaxLimit: Settings.MemTempMaxLimit, TcAvgLimit: Settings.TcAvgLimit));
         _userPresets = _userPresets.OrderBy(preset => preset.Name, StringComparer.OrdinalIgnoreCase).ToList();
         Settings.PresetName = name;
         _editing = null;
@@ -242,7 +294,7 @@
     {
         try
         {
-            await JS.InvokeVoidAsync("gpuSettings.saveLast", new StoredValues(Settings.UtilizationMin, Settings.UtilizationMax, Settings.ExpectedTgpWatts, Settings.RequiredTgpPercent, Settings.PresetName));
+            await JS.InvokeVoidAsync("gpuSettings.saveLast", StoredValues.From(Settings));
         }
         catch
         {

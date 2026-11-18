@@ -12,12 +12,12 @@
 
 <div class="page-head">
     <h3>Batch check</h3>
-    <p class="muted">Drop several GPUMON logs to get a TGP PASS/FAIL for every unit. Files that match a saved preset's file prefix use that preset; all others use the settings below.</p>
+    <p class="muted">Drop several GPUMON logs (and their PicoLog files) to get a PASS/FAIL for every unit. PicoLog files are paired with the GPUMON log they overlap in time. Files that match a saved preset's file prefix use that preset; all others use the settings below.</p>
 </div>
 
 <div class="dropzone @(_dragOver ? "over" : "") @(_rows.Count > 0 ? "compact" : "")"
      @ondragenter="() => _dragOver = true" @ondragleave="() => _dragOver = false" @ondrop="() => _dragOver = false">
-    <InputFile OnChange="OnFilesSelectedAsync" multiple accept=".csv,text/csv" class="dropzone-input" title="Choose GPUMON .csv files" />
+    <InputFile OnChange="OnFilesSelectedAsync" multiple accept=".csv,text/csv" class="dropzone-input" title="Choose GPUMON and PicoLog .csv files" />
     <div class="dropzone-text">
         @if (_progress is not null)
         {
@@ -32,7 +32,7 @@
         else
         {
             <strong>Drop GPUMON .csv files here</strong>
-            <span>or click to choose several</span>
+            <span>with their PicoLog files (optional) · or click to choose several</span>
         }
     </div>
 </div>
@@ -44,17 +44,22 @@
 @if (_rows.Count > 0)
 {
     var analyzed = _rows.Where(row => row.Analysis is not null).ToArray();
-    var passed = analyzed.Count(row => row.Analysis!.TgpCheck.Passed == true);
-    var failed = analyzed.Count(row => row.Analysis!.TgpCheck.Passed == false);
+    var passed = analyzed.Count(row => row.Verdict?.Passed == true);
+    var failed = analyzed.Count(row => row.Verdict?.Passed == false);
+    var showTc = _rows.Any(row => row.Pico is not null);
     <section class="batch">
         <div class="batch-head">
             <div class="batch-summary">
-                <strong>@_rows.Count @(_rows.Count == 1 ? "log" : "logs")</strong>
+                <strong>@_rows.Count GPUMON @(_rows.Count == 1 ? "log" : "logs")</strong>
                 <span class="tally pass">@passed PASS</span>
                 <span class="tally fail">@failed FAIL</span>
                 @if (_rows.Count - passed - failed > 0)
                 {
                     <span class="tally na">@(_rows.Count - passed - failed) @(_rows.Count - passed - failed == 1 ? "error" : "errors")</span>
+                }
+                @if (_picoLogs.Count > 0)
+                {
+                    <span class="tally pico">@_picoLogs.Count(pico => pico.Row is not null) of @_picoLogs.Count PicoLog paired</span>
                 }
             </div>
             <div class="batch-actions">
@@ -70,10 +75,16 @@
                         <th>Result</th>
                         <th>≥ expected</th>
                         <th>Passes up to</th>
+                        <th title="FurMark load: first to last sample within the utilization range">Load time</th>
                         <th>Samples</th>
                         <th>TGP avg (W)</th>
-                        <th>GPU temp avg/max (°C)</th>
-                        <th>GPC avg (MHz)</th>
+                        <th>GPU temp avg (°C)</th>
+                        <th>Mem temp max (°C)</th>
+                        @if (showTc)
+                        {
+                            <th>TC avg (°C)</th>
+                            <th>Chamber (°C)</th>
+                        }
                         <th></th>
                     </tr>
                 </thead>
@@ -81,12 +92,23 @@
                     @foreach (var row in _rows)
                     {
                         <tr @key="row.FileName">
-                            <th scope="row" class="file-col" title="@row.FileName">@row.FileName</th>
+                            <th scope="row" class="file-col" title="@RowTitle(row)">
+                                @row.FileName
+                                @if (row.PicoName is not null)
+                                {
+                                    <small class="row-pico">+ @row.PicoName</small>
+                                }
+                            </th>
                             @if (row.Analysis is { } a)
                             {
                                 var check = a.TgpCheck;
+                                var verdict = row.Verdict!;
                                 <td>
-                                    <span class="badge-result @(check.Passed switch { true => "pass", false => "fail", _ => "na" })">@check.Verdict</span>
+                                    <span class="badge-result @(verdict.Passed switch { true => "pass", false => "fail", _ => "na" })">@verdict.Verdict</span>
+                                    @if (verdict.HasLimitChecks && verdict.FailedChecks.Any())
+                                    {
+                                        <small class="row-failed">@string.Join(", ", verdict.FailedChecks)</small>
+                                    }
                                     @if (row.Preset is not null)
                                     {
                                         <small class="row-preset" title="Preset applied from the file name">@row.Preset.Name</small>
@@ -94,10 +116,16 @@
                                 </td>
                                 <td>@Pct(check.PercentAtOrAbove) <small class="muted-cell">≥ @Fmt(check.ExpectedWatts) W</small></td>
                                 <td>@(check.PassingTgpWatts is null ? "–" : $"{Fmt(check.PassingTgpWatts)} W")</td>
+                                <td title="@LoadTitle(row.Timeline!)">@TestTimeline.Span(row.Timeline!.LoadDuration)</td>
                                 <td class="@(a.ReliabilityWarning is null ? "" : "warn")" title="@a.ReliabilityWarning">@a.InRangeSamples.Count.ToString("N0")@(a.ReliabilityWarning is null ? "" : " ⚠")</td>
                                 <td>@Fmt(a.Tgp.Average)</td>
-                                <td>@Fmt(a.GpuTemperature.Average) / @Fmt(a.GpuTemperature.Maximum)</td>
-                                <td>@Fmt(a.GpcClock.Average)</td>
+                                <td class="@CheckClass(verdict, "GPU temp avg")">@Fmt(a.GpuTemperature.Average)</td>
+                                <td class="@CheckClass(verdict, "Memory temp max")">@Fmt(a.MemoryTemperature.Maximum)</td>
+                                @if (showTc)
+                                {
+                                    <td class="@CheckClass(verdict, "TC avg")" title="@row.Tc?.Warning">@(row.Tc is { MatchedSamples: > 0 } tc ? Fmt(tc.TcAverage.Average) : "–")@(row.Tc?.Warning is null ? "" : " ⚠")</td>
+                                    <td>@Fmt(row.Tc?.Chamber?.Average)</td>
+                                }
                                 <td class="row-actions">
                                     <a href="@($"/productDev/Tools/gpuMonLogParser?log={row.HandoffId}")">Open</a>
                                     <button title="Remove" @onclick="() => Remove(row)">×</button>
@@ -105,9 +133,17 @@
                             }
                             else
                             {
-                                <td colspan="7" class="row-error" title="@row.Error">@ShortError(row.Error)</td>
+                                <td colspan="@(showTc ? 10 : 8)" class="row-error" title="@row.Error">@ShortError(row.Error)</td>
                                 <td class="row-actions"><button title="Remove" @onclick="() => Remove(row)">×</button></td>
                             }
+                        </tr>
+                    }
+                    @foreach (var pico in _picoLogs.Where(pico => pico.Row is null))
+                    {
+                        <tr @key="pico.FileName">
+                            <th scope="row" class="file-col" title="@pico.FileName">@pico.FileName</th>
+                            <td colspan="@(showTc ? 10 : 8)" class="row-error">PicoLog with no matching GPUMON log (covers @pico.Log.Start.ToString("yyyy-MM-dd HH:mm")–@pico.Log.End.ToString("HH:mm")). Add the GPUMON log recorded at that time.</td>
+                            <td class="row-actions"><button title="Remove" @onclick="() => RemovePico(pico)">×</button></td>
                         </tr>
                     }
                 </tbody>
@@ -148,6 +184,10 @@
     .badge-result.pass{background:#16a34a}.badge-result.fail{background:#dc2626}.badge-result.na{background:#475569}
     .batch-table td.warn{color:#fde68a}
     .row-error{color:#fca5a5!important;text-align:left!important;white-space:normal!important}
+    .row-pico{display:block;margin-top:2px;color:#94a3b8;font-size:.68rem;font-weight:500;overflow:hidden;text-overflow:ellipsis}
+    .row-failed{display:block;margin-top:2px;color:#fca5a5;font-size:.66rem}
+    .tally.pico{background:#1e3a5f;color:#bfdbfe}
+    .batch-table td.over{color:#fca5a5}
     .row-preset{display:block;margin-top:2px;color:#7dd3fc;font-size:.66rem}
     .muted-cell{color:#64748b;font-size:.7rem}
     .row-actions{display:flex;gap:10px;justify-content:flex-end;align-items:center}
@@ -160,8 +200,10 @@
     private const int MaxFiles = 200;
     private readonly AnalysisSettings _settings = new();
     private readonly List<BatchRow> _rows = [];
+    private readonly List<PicoFile> _picoLogs = [];
     private string? _progress;
     private bool _dragOver;
+    private AnalysisSettingsBar? _settingsBar;
 
     private sealed class BatchRow(string fileName)
     {
@@ -169,16 +211,36 @@
         public GpuMonLog? Log { get; set; }
         public Guid HandoffId { get; set; }
         public GpuMonAnalysis? Analysis { get; set; }
+        public ThermocoupleResult? Tc { get; set; }
+        public ProjectVerdict? Verdict { get; set; }
+        public TestTimeline? Timeline { get; set; }
         public string? Error { get; set; }
         public AnalysisPreset? Preset { get; set; }
+        public PicoFile? PicoFile { get; set; }
+        public PicoLog? Pico => PicoFile?.Log;
+        public string? PicoName => PicoFile?.FileName;
     }
 
-    private AnalysisSettingsBar? _settingsBar;
+    private sealed class PicoFile(string fileName, PicoLog log)
+    {
+        public string FileName { get; } = fileName;
+        public PicoLog Log { get; } = log;
+        public BatchRow? Row { get; set; }
+    }
 
     private static string? ShortError(string? error)
         => error is null ? null
-            : error.StartsWith("This doesn't look like a GPU Monitor", StringComparison.Ordinal) ? "Not a GPUMON log (no GPU Utilization column found)."
+            : error.StartsWith("This doesn't look like a GPU Monitor", StringComparison.Ordinal) ? "Not a GPUMON or PicoLog file."
             : error.Length > 120 ? error[..120] + "…" : error;
+
+    private static string LoadTitle(TestTimeline timeline) => $"FurMark load {timeline.LoadText}";
+
+    private static string Stamp(DateTime? time) => time?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? "";
+
+    private static string RowTitle(BatchRow row) => row.PicoName is null ? row.FileName : $"{row.FileName} + {row.PicoName}";
+
+    private static string CheckClass(ProjectVerdict verdict, string name)
+        => verdict.Checks.FirstOrDefault(check => check.Name == name)?.Passed == false ? "over" : "";
 
     // Round half away from zero so displayed values match Excel (e.g. 83.195 -> 83.2).
     private static string Fmt(decimal? value) => value.HasValue ? Math.Round(value.Value, 2, MidpointRounding.AwayFromZero).ToString("0.##", CultureInfo.InvariantCulture) : "–";
@@ -200,9 +262,16 @@
                     throw new InvalidOperationException("Not a .csv file.");
                 await using var stream = file.OpenReadStream(50 * 1024 * 1024);
                 using var reader = new StreamReader(stream, Encoding.UTF8, true);
-                row.Log = Analyzer.Parse(await reader.ReadToEndAsync());
-                row.HandoffId = Handoff.Offer(file.Name, row.Log);
+                var content = await reader.ReadToEndAsync();
+                if (PicoLogParser.LooksLikePicoLog(content))
+                {
+                    _picoLogs.RemoveAll(existing => existing.FileName.Equals(file.Name, StringComparison.OrdinalIgnoreCase));
+                    _picoLogs.Add(new PicoFile(file.Name, PicoLogParser.Parse(content)));
+                    continue;
+                }
+                row.Log = Analyzer.Parse(content);
                 row.Preset = _settingsBar is null ? null : await _settingsBar.FindPresetForFileAsync(file.Name);
+                // Show the result right away; PicoLogs are paired once every file has been read.
                 Analyze(row);
             }
             catch (Exception ex)
@@ -213,15 +282,44 @@
             _rows.Add(row);
         }
         _rows.Sort((left, right) => string.Compare(left.FileName, right.FileName, StringComparison.OrdinalIgnoreCase));
+        PairAndAnalyze();
         _progress = null;
+    }
+
+    // Pairs each PicoLog with the GPUMON log it overlaps most in time (one PicoLog per GPUMON log), then analyzes every row.
+    private void PairAndAnalyze()
+    {
+        foreach (var pico in _picoLogs) pico.Row = null;
+        foreach (var row in _rows) row.PicoFile = null;
+        var candidates = _picoLogs
+            .SelectMany(pico => _rows.Where(row => row.Log is not null).Select(row => (pico, row, overlap: Overlap(pico.Log, row.Log!))))
+            .Where(item => item.overlap > 0)
+            .OrderByDescending(item => item.overlap);
+        foreach (var (pico, row, _) in candidates)
+        {
+            if (pico.Row is not null || row.PicoFile is not null) continue;
+            pico.Row = row;
+            row.PicoFile = pico;
+        }
+        foreach (var row in _rows) Analyze(row);
+    }
+
+    private static int Overlap(PicoLog pico, GpuMonLog log)
+    {
+        var start = pico.Start - PicoLogParser.MatchTolerance;
+        var end = pico.End + PicoLogParser.MatchTolerance;
+        return log.Samples.Count(sample => sample.Timestamp is { } time && time >= start && time <= end);
     }
 
     private void Analyze(BatchRow row)
     {
         if (row.Log is null) return;
-        row.Analysis = row.Preset is { } preset
-            ? Analyzer.Analyze(row.Log, preset.UtilizationMin, preset.UtilizationMax, preset.ExpectedTgpWatts, preset.RequiredTgpPercent)
-            : Analyzer.Analyze(row.Log, _settings.UtilizationMin, _settings.UtilizationMax, _settings.ExpectedTgpWatts, _settings.RequiredTgpPercent);
+        var settings = row.Preset?.ToSettings() ?? _settings;
+        row.Analysis = Analyzer.Analyze(row.Log, settings.UtilizationMin, settings.UtilizationMax, settings.ExpectedTgpWatts, settings.RequiredTgpPercent);
+        row.Tc = row.Pico is null ? null : PicoLogParser.Match(row.Pico, row.Analysis.InRangeSamples);
+        row.Verdict = ProjectChecks.Evaluate(row.Analysis, row.Tc, settings);
+        row.Timeline = TestTimeline.From(row.Analysis, row.Tc);
+        row.HandoffId = Handoff.Offer(row.FileName, row.Log, row.PicoName, row.Pico);
     }
 
     private async Task OnSettingsChangedAsync(SettingsChange change)
@@ -235,9 +333,24 @@
         }
     }
 
-    private void Remove(BatchRow row) => _rows.Remove(row);
+    private void Remove(BatchRow row)
+    {
+        _rows.Remove(row);
+        if (row.PicoFile is { } pico) _picoLogs.Remove(pico);
+        PairAndAnalyze();
+    }
 
-    private void Clear() => _rows.Clear();
+    private void RemovePico(PicoFile pico)
+    {
+        _picoLogs.Remove(pico);
+        PairAndAnalyze();
+    }
+
+    private void Clear()
+    {
+        _rows.Clear();
+        _picoLogs.Clear();
+    }
 
     private async Task ExportCsvAsync()
     {
@@ -250,34 +363,48 @@
                 IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
                 _ => value.ToString() ?? ""
             };
+            text = text.Replace("≥", ">=").Replace("≤", "<=").Replace("–", "-");
             const char quote = '\u0022';
             var escaped = text.Replace(quote.ToString(), new string(quote, 2));
             return text.IndexOfAny([',', quote, '\n']) >= 0 ? quote + escaped + quote : text;
         }
 
-        var sb = new StringBuilder();
-        sb.AppendLine(string.Join(',', "File", "Result", "Percent >= expected", "Samples >= expected", "TGP samples", "Expected TGP (W)", "Required (%)",
-            "GPU utilization range", "Passes up to (W)", "Samples short", "In-range samples", "Total samples",
+        string[] header =
+        [
+            "File", "Result", "Failed checks", "TGP result", "Percent >= expected", "Samples >= expected", "TGP samples", "Expected TGP (W)", "Required (%)",
+            "GPU utilization range", "Log start", "Log end", "Load start", "Load end", "Load duration", "Time in range", "Load periods", "Passes up to (W)", "Samples short", "In-range samples", "Total samples",
             "TGP min (W)", "TGP avg (W)", "TGP max (W)", "GPU temp min (C)", "GPU temp avg (C)", "GPU temp max (C)",
             "Mem temp min (C)", "Mem temp avg (C)", "Mem temp max (C)", "GPC clock avg (MHz)", "Memory clock avg (MHz)",
-            "GPU", "VBIOS", "Driver", "Warning or error"));
+            "GPU temp avg limit (C)", "Mem temp max limit (C)", "TC avg limit (C)",
+            "PicoLog file", "PicoLog start", "PicoLog end", "TC avg (C)", "TC max (C)", "Chamber avg (C)", "PicoLog matched samples",
+            "GPU", "VBIOS", "Driver", "Warning or error",
+        ];
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Join(',', header));
         foreach (var row in _rows)
         {
             if (row.Analysis is not { } a || row.Log is null)
             {
-                sb.AppendLine(string.Join(',', Cell(row.FileName), "ERROR", string.Join(',', Enumerable.Repeat("", 24)), Cell(row.Error)));
+                sb.AppendLine(string.Join(',', Cell(row.FileName), "ERROR", string.Join(',', Enumerable.Repeat("", header.Length - 3)), Cell(row.Error)));
                 continue;
             }
             var c = a.TgpCheck;
+            var settings = row.Preset?.ToSettings() ?? _settings;
+            var warning = string.Join(" ", new[] { a.ReliabilityWarning, row.Tc?.Warning }.Where(text => text is not null));
             sb.AppendLine(string.Join(',', new object?[]
             {
-                row.FileName, c.Verdict, c.PercentAtOrAbove, c.SamplesAtOrAbove, c.SampleCount, c.ExpectedWatts, c.RequiredPercent,
-                a.UtilizationRange, c.PassingTgpWatts, c.SamplesShort, a.InRangeSamples.Count, row.Log.Samples.Count,
+                row.FileName, row.Verdict?.Verdict, string.Join("; ", row.Verdict?.FailedChecks ?? []), c.Verdict, c.PercentAtOrAbove, c.SamplesAtOrAbove, c.SampleCount, c.ExpectedWatts, c.RequiredPercent,
+                a.UtilizationRange, Stamp(row.Timeline!.LogStart), Stamp(row.Timeline.LogEnd), Stamp(row.Timeline.LoadStart), Stamp(row.Timeline.LoadEnd),
+                TestTimeline.Span(row.Timeline.LoadDuration), TestTimeline.Span(row.Timeline.TimeInRange), row.Timeline.LoadPeriods, c.PassingTgpWatts, c.SamplesShort, a.InRangeSamples.Count, row.Log.Samples.Count,
                 a.Tgp.Minimum, a.Tgp.Average, a.Tgp.Maximum, a.GpuTemperature.Minimum, a.GpuTemperature.Average, a.GpuTemperature.Maximum,
                 a.MemoryTemperature.Minimum, a.MemoryTemperature.Average, a.MemoryTemperature.Maximum, a.GpcClock.Average, a.MemoryClock.Average,
-                row.Log.BrandName, row.Log.VbiosVersion, row.Log.DriverVersion, a.ReliabilityWarning
+                settings.GpuTempAvgLimit, settings.MemTempMaxLimit, settings.TcAvgLimit,
+                row.PicoName, Stamp(row.Timeline.PicoStart), Stamp(row.Timeline.PicoEnd), row.Tc?.TcAverage.Average, row.Tc?.TcAverage.Maximum, row.Tc?.Chamber?.Average, row.Tc?.MatchedSamples,
+                row.Log.BrandName, row.Log.VbiosVersion, row.Log.DriverVersion, warning
             }.Select(Cell)));
         }
+        foreach (var pico in _picoLogs.Where(pico => pico.Row is null))
+            sb.AppendLine(string.Join(',', Cell(pico.FileName), "ERROR", string.Join(',', Enumerable.Repeat("", header.Length - 3)), "PicoLog with no matching GPUMON log"));
         await JS.InvokeVoidAsync("gpuSettings.downloadText", $"gpumon-batch-{DateTime.Now:yyyyMMdd-HHmm}.csv", sb.ToString(), "text/csv;charset=utf-8");
     }
 }

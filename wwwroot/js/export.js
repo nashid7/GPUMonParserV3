@@ -107,10 +107,10 @@ window.gpuExport = (() => {
 
     const drawOverviewCards = (pdf, report, y) => {
         const cards = [
-            ["UTILIZATION FILTER", value(read(report, "Filter"))],
+            ["RESULT", value(read(report, "OverallVerdict"))],
             ["MATCHING SAMPLES", `${number(read(report, "MatchingRows"))} / ${number(read(report, "TotalRows"))}`],
             ["COVERAGE", value(read(report, "Coverage"))],
-            ["DURATION", value(read(report, "Duration"))],
+            ["LOAD DURATION", value(read(report, "Duration"))],
         ];
         const gap = 3;
         const width = (182 - gap * 3) / 4;
@@ -233,7 +233,11 @@ window.gpuExport = (() => {
         y = sectionTitle(pdf, "Test identity", "Source and GPU configuration used for this report.", y);
         const identity = [
             { field: "Source file", value: value(read(report, "SourceFile")) },
+            ...(read(report, "PicoFile") ? [{ field: "PicoLog file", value: `${value(read(report, "PicoFile"))} (${value(read(report, "TcCoverage"))})` }] : []),
             { field: "Test date", value: value(read(report, "Date")) },
+            { field: "GPUMON log recorded", value: value(read(report, "LogRecorded")) },
+            { field: `FurMark load (${value(read(report, "Filter"))} utilization)`, value: value(read(report, "LoadPeriod")) },
+            ...(read(report, "PicoRecorded") ? [{ field: "PicoLog recorded", value: value(read(report, "PicoRecorded")) }] : []),
             { field: "GPU", value: value(read(report, "BrandName")) },
             { field: "VBIOS", value: value(read(report, "VbiosVersion")) },
             { field: "Driver", value: value(read(report, "DriverVersion")) },
@@ -244,7 +248,7 @@ window.gpuExport = (() => {
         y = addTable(pdf, identity, y, [
             { header: "Field", key: "field" },
             { header: "Value", key: "value" },
-        ], { columnStyles: { field: { cellWidth: 42, fontStyle: "bold" } } });
+        ], { columnStyles: { field: { cellWidth: 58, fontStyle: "bold" } } });
 
         y = sectionTitle(pdf, "Filtered performance metrics", `Calculated from samples in the inclusive ${value(read(report, "Filter"))} utilization range.`, y);
         const metrics = [
@@ -267,6 +271,45 @@ window.gpuExport = (() => {
             { header: "Average", key: "average" },
             { header: "Maximum", key: "maximum" },
         ], { columnStyles: { metric: { cellWidth: 50 }, unit: { cellWidth: 20 } } });
+
+        const resultColor = result => result === "PASS" ? [22, 163, 74] : result === "FAIL" ? [220, 38, 38] : palette.muted;
+        const thermocouples = read(report, "Thermocouples");
+        if (thermocouples?.length) {
+            y = sectionTitle(pdf, "Thermocouples (PicoLog)", `PicoLog readings matched to the GPUMON samples within the ${value(read(report, "Filter"))} utilization range.`, y);
+            y = addTable(pdf, thermocouples.map(row => ({
+                name: value(read(row, "Name")),
+                minimum: value(read(row, "Min")),
+                average: value(read(row, "Avg")),
+                maximum: value(read(row, "Max")),
+            })), y, [
+                { header: "Channel (C)", key: "name" },
+                { header: "Minimum", key: "minimum" },
+                { header: "Average", key: "average" },
+                { header: "Maximum", key: "maximum" },
+            ], { columnStyles: { name: { cellWidth: 70 } } });
+        }
+
+        const checks = read(report, "Checks");
+        if (checks?.length) {
+            y = sectionTitle(pdf, "Project checks", "Overall result is PASS only when every check passes.", y);
+            y = addTable(pdf, checks.map(row => ({
+                name: value(read(row, "Name")),
+                detail: value(read(row, "Detail")),
+                result: value(read(row, "Result")),
+            })), y, [
+                { header: "Check", key: "name" },
+                { header: "Value", key: "detail" },
+                { header: "Result", key: "result" },
+            ], {
+                columnStyles: { name: { cellWidth: 45, fontStyle: "bold" }, result: { cellWidth: 24 } },
+                didParseCell: data => {
+                    if (data.section !== "body" || data.column.dataKey !== "result") return;
+                    data.cell.styles.fontStyle = "bold";
+                    data.cell.styles.textColor = palette.white;
+                    data.cell.styles.fillColor = resultColor(data.cell.raw);
+                },
+            });
+        }
 
         y = sectionTitle(pdf, "TGP requirement", `PASS when at least ${value(read(report, "TgpRequired"))}% of TGP samples within ${value(read(report, "Filter"))} utilization are >= ${value(read(report, "TgpExpected"))} W.`, y);
         const verdict = value(read(report, "TgpVerdict"));
@@ -330,6 +373,7 @@ window.gpuExport = (() => {
             { id: "chart-memory", label: "Memory temperature" },
             { id: "chart-gpc-clock", label: "GPC clock" },
             { id: "chart-memory-clock", label: "Memory clock" },
+            { id: "chart-tc", label: "Thermocouples (PicoLog)" },
         ].filter(chart => document.getElementById(chart.id));
         if (performanceCharts.length) {
             pdf.addPage("a4", "portrait");

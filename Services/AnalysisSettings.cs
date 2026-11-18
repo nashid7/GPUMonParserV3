@@ -8,6 +8,13 @@ public sealed class AnalysisSettings
     public decimal ExpectedTgpWatts { get; set; } = GpuMonLogAnalyzer.DefaultExpectedTgpWatts;
     public decimal RequiredTgpPercent { get; set; } = GpuMonLogAnalyzer.DefaultRequiredTgpPercent;
 
+    // Optional project limits; null means the check is not run.
+    public decimal? GpuTempAvgLimit { get; set; }
+    public decimal? MemTempMaxLimit { get; set; }
+    public decimal? TcAvgLimit { get; set; }
+
+    public bool HasLimits => GpuTempAvgLimit.HasValue || MemTempMaxLimit.HasValue || TcAvgLimit.HasValue;
+
     /// <summary>Name of the preset the values came from, if they still match it.</summary>
     public string? PresetName { get; set; }
 
@@ -15,7 +22,8 @@ public sealed class AnalysisSettings
 
     public bool Matches(AnalysisPreset preset)
         => preset.UtilizationMin == UtilizationMin && preset.UtilizationMax == UtilizationMax &&
-           preset.ExpectedTgpWatts == ExpectedTgpWatts && preset.RequiredTgpPercent == RequiredTgpPercent;
+           preset.ExpectedTgpWatts == ExpectedTgpWatts && preset.RequiredTgpPercent == RequiredTgpPercent &&
+           preset.GpuTempAvgLimit == GpuTempAvgLimit && preset.MemTempMaxLimit == MemTempMaxLimit && preset.TcAvgLimit == TcAvgLimit;
 
     public void Apply(AnalysisPreset preset)
     {
@@ -23,6 +31,9 @@ public sealed class AnalysisSettings
         UtilizationMax = preset.UtilizationMax;
         ExpectedTgpWatts = preset.ExpectedTgpWatts;
         RequiredTgpPercent = preset.RequiredTgpPercent;
+        GpuTempAvgLimit = preset.GpuTempAvgLimit;
+        MemTempMaxLimit = preset.MemTempMaxLimit;
+        TcAvgLimit = preset.TcAvgLimit;
         PresetName = preset.Name;
     }
 }
@@ -35,10 +46,23 @@ public sealed record AnalysisPreset(
     int UtilizationMax,
     decimal ExpectedTgpWatts,
     decimal RequiredTgpPercent,
-    bool BuiltIn = false);
+    bool BuiltIn = false,
+    decimal? GpuTempAvgLimit = null,
+    decimal? MemTempMaxLimit = null,
+    decimal? TcAvgLimit = null)
+{
+    /// <summary>Analysis settings equivalent to this preset.</summary>
+    public AnalysisSettings ToSettings()
+    {
+        var settings = new AnalysisSettings();
+        settings.Apply(this);
+        return settings;
+    }
+}
 
 public enum SettingsChange
 {
     Range,
     Tgp,
+    Limits,
 }

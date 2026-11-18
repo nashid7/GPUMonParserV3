@@ -493,7 +493,7 @@ public sealed class GpuMonLogAnalyzer
             .ToArray();
     }
 
-    private static string[] SplitDelimitedLine(string line, char delimiter)
+    internal static string[] SplitDelimitedLine(string line, char delimiter)
     {
         var values = new List<string>();
         var current = new StringBuilder();

@@ -24,3 +24,6 @@ jobs:
 
     - name: Build
       run: dotnet build --configuration Release --no-restore /p:UseAppHost=false
+
+    - name: Test
+      run: dotnet test tests/par.Tests --configuration Release

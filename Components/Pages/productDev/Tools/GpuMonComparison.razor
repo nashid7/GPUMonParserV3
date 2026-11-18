@@ -32,8 +32,14 @@
                     }
                 </div>
                 <div class="run-drop @(slot.Log is not null ? "ready" : "")">
-                    <InputFile OnChange="@(args => SelectFileAsync(slotIndex, args))" accept=".csv,text/csv" class="run-drop-input" title="Choose a GPUMON .csv file" />
-                    <span>@(slot.FileName ?? "Drop a GPUMON .csv or click")</span>
+                    <InputFile OnChange="@(args => SelectFileAsync(slotIndex, args))" multiple accept=".csv,text/csv" class="run-drop-input" title="Choose a GPUMON .csv (and optionally its PicoLog .csv)" />
+                    <span>
+                        @(slot.FileName ?? "Drop a GPUMON .csv (+ PicoLog) or click")
+                        @if (slot.PicoName is not null)
+                        {
+                            <small class="run-pico">+ @slot.PicoName</small>
+                        }
+                    </span>
                 </div>
                 @if (!string.IsNullOrWhiteSpace(slot.Error))
                 {
@@ -58,7 +64,7 @@
         <div class="section-head">
             <div>
                 <h4>Results</h4>
-                <p class="muted">GPU utilization @_settings.UtilizationRange · Expected TGP @Fmt(_settings.ExpectedTgpWatts) W · Pass if ≥ @Fmt(_settings.RequiredTgpPercent)% of samples</p>
+                <p class="muted">GPU utilization @_settings.UtilizationRange · Expected TGP @Fmt(_settings.ExpectedTgpWatts) W · Pass if ≥ @Fmt(_settings.RequiredTgpPercent)% of samples@(_settings.HasLimits ? " · with project limits" : "")</p>
             </div>
         </div>
 
@@ -78,6 +84,43 @@
                     </tr>
                 </thead>
                 <tbody>
+                    @if (_settings.HasLimits)
+                    {
+                        <tr>
+                            <th scope="row" class="metric-name"><strong>Result</strong><span>TGP and project limits</span></th>
+                            @foreach (var result in _results)
+                            {
+                                <td>
+                                    <div class="tgp-cell @(result.Verdict.Passed switch { true => "pass", false => "fail", _ => "na" })">
+                                        <strong>@result.Verdict.Verdict</strong>
+                                        <span>
+                                            @foreach (var item in result.Verdict.Checks)
+                                            {
+                                                <small class="@(item.Passed == false ? "bad" : "")">@(item.Passed switch { true => "✓", false => "✗", _ => "–" }) @item.Name @item.Detail</small>
+                                            }
+                                        </span>
+                                    </div>
+                                </td>
+                            }
+                        </tr>
+                    }
+                    <tr>
+                        <th scope="row" class="metric-name"><strong>FurMark load</strong><span>GPU utilization @_settings.UtilizationRange</span></th>
+                        @foreach (var result in _results)
+                        {
+                            var timeline = result.Timeline;
+                            <td>
+                                <div class="load-cell">
+                                    <strong>@TestTimeline.Span(timeline.LoadDuration)</strong>
+                                    <span>@timeline.LoadStart?.ToString("yyyy-MM-dd") · @TestTimeline.Range(timeline.LoadStart, timeline.LoadEnd)</span>
+                                    @if (timeline.HasDips)
+                                    {
+                                        <small>@TestTimeline.Span(timeline.TimeInRange) in range over @timeline.LoadPeriods periods</small>
+                                    }
+                                </div>
+                            </td>
+                        }
+                    </tr>
                     <tr>
                         <th scope="row" class="metric-name"><strong>TGP check</strong><span>≥ @Fmt(_settings.ExpectedTgpWatts) W in ≥ @Fmt(_settings.RequiredTgpPercent)%</span></th>
                         @foreach (var result in _results)
@@ -117,6 +160,33 @@
                                 </td>
                             }
                         </tr>
+                    }
+                    @if (_results.Any(result => result.Tc is { MatchedSamples: > 0 }))
+                    {
+                        @foreach (var (label, select) in TcRows)
+                        {
+                            <tr>
+                                <th scope="row" class="metric-name"><strong>@label</strong><span>°C · PicoLog</span></th>
+                                @foreach (var result in _results)
+                                {
+                                    var metric = result.Tc is { MatchedSamples: > 0 } tc ? select(tc) : null;
+                                    <td>
+                                        @if (metric is null)
+                                        {
+                                            <div class="no-pico" title="@result.Tc?.Warning">@(result.Tc is null ? "No PicoLog" : "No matching readings")</div>
+                                        }
+                                        else
+                                        {
+                                            <div class="metric-value-grid">
+                                                <div><span>Min</span><strong>@Fmt(metric.Minimum)</strong></div>
+                                                <div class="average"><span>Average</span><strong>@Fmt(metric.Average)</strong></div>
+                                                <div><span>Max</span><strong>@Fmt(metric.Maximum)</strong></div>
+                                            </div>
+                                        }
+                                    </td>
+                                }
+                            </tr>
+                        }
                     }
                 </tbody>
             </table>
@@ -169,6 +239,12 @@
     .compare-hint{margin:12px 0 0;color:#94a3b8;font-size:.84rem}
     .comparison-table-wrap{overflow:auto;margin:14px 0 16px;border:1px solid #2a4164;border-radius:12px;background:#0a1425}.comparison-table{width:100%;min-width:760px;border-collapse:separate;border-spacing:0;table-layout:fixed}.comparison-table th,.comparison-table td{padding:12px;border-right:1px solid #233653;border-bottom:1px solid #233653}.comparison-table tr>*:last-child{border-right:0}.comparison-table tbody tr:last-child>*{border-bottom:0}.comparison-table thead th{background:#142139;color:#f8fafc;text-align:left;vertical-align:top}.comparison-table .metric-column{width:170px;color:#94a3b8;text-transform:uppercase;font-size:.68rem;letter-spacing:.07em}.run-key{display:flex;align-items:center;gap:7px;font-size:.86rem;font-weight:700}.run-key:before{content:"";flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--run-color)}.run-file{display:block;margin:5px 0 0 16px;color:#8293aa;font-size:.66rem;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.metric-name{background:#101c31;color:#f8fafc;text-align:left}.metric-name strong{display:block;font-size:.8rem}.metric-name span{display:block;margin-top:3px;color:#7dd3fc;font-size:.67rem;font-weight:500}.metric-value-grid{display:grid;grid-template-columns:repeat(3,minmax(58px,1fr));gap:6px}.metric-value-grid>div{min-width:0;padding:6px;border:1px solid #263b5b;border-radius:7px;background:#0d192b;text-align:center}.metric-value-grid span{display:block;margin-bottom:3px;color:#7f90a8;text-transform:uppercase;font-size:.57rem;font-weight:700;letter-spacing:.05em}.metric-value-grid strong{display:block;color:#dbeafe;font-size:.78rem;font-variant-numeric:tabular-nums}.metric-value-grid .average{border-color:#315a86;background:#10243b}.metric-value-grid .average span{color:#7dd3fc}.metric-value-grid .average strong{color:#fff;font-size:.86rem}
     .tgp-cell{display:flex;align-items:center;gap:10px;padding:7px 9px;border:1px solid #263b5b;border-left:4px solid var(--tgp-color,#64748b);border-radius:7px;background:#0d192b}.tgp-cell.pass{--tgp-color:#22c55e}.tgp-cell.fail{--tgp-color:#ef4444}.tgp-cell strong{padding:3px 9px;border-radius:5px;background:var(--tgp-color,#64748b);color:#fff;font-size:.8rem;letter-spacing:.05em}.tgp-cell span{color:#dbeafe;font-size:.72rem;font-variant-numeric:tabular-nums}.tgp-cell small{display:block;color:#94a3b8;font-size:.66rem}
+    .load-cell{display:flex;flex-direction:column;gap:2px;padding:4px 2px}
+    .load-cell strong{color:#f8fafc;font-size:.95rem;font-variant-numeric:tabular-nums}
+    .load-cell span,.load-cell small{color:#94a3b8;font-size:.7rem}
+    .run-pico{display:block;margin-top:2px;color:#93c5fd;font-size:.68rem}
+    .tgp-cell small.bad{color:#fca5a5}
+    .no-pico{padding:8px;color:#64748b;font-size:.74rem;text-align:center}
     .cell-warning{margin-top:5px;color:#fde68a;font-size:.68rem}
     .comparison-chart-card{margin-top:12px;padding:14px;border:1px solid #263a59;border-radius:12px;background:#0a1425}.comparison-chart-card>div:first-child{display:flex;justify-content:space-between;gap:12px;align-items:center}.comparison-chart-card>div:first-child span{font-size:.7rem;color:#8293aa}.comparison-chart-frame{height:300px;margin-top:9px}.comparison-chart-frame.capping{height:340px}.comparison-chart-frame canvas{width:100%!important;height:100%!important}
     @@media(max-width:700px){.comparison-chart-card>div:first-child{display:block}.comparison-table{min-width:680px}.comparison-table .metric-column{width:140px}}
@@ -196,10 +272,21 @@
         public string Name { get; set; } = name;
         public string? FileName { get; set; }
         public GpuMonLog? Log { get; set; }
+        public string? PicoName { get; set; }
+        public PicoLog? Pico { get; set; }
         public string? Error { get; set; }
     }
 
-    private sealed record RunResult(string Name, string SourceFile, GpuMonAnalysis Analysis, string Color);
+    private sealed record RunResult(string Name, string SourceFile, GpuMonAnalysis Analysis, string Color, ThermocoupleResult? Tc, ProjectVerdict Verdict)
+    {
+        public TestTimeline Timeline { get; } = TestTimeline.From(Analysis, Tc);
+    }
+
+    private static readonly (string Label, Func<ThermocoupleResult, MetricStats?> Select)[] TcRows =
+    [
+        ("TC average", tc => tc.TcAverage),
+        ("Chamber", tc => tc.Chamber),
+    ];
 
     private sealed record MetricDefinition(string Label, string Unit, Func<GpuMonAnalysis, MetricStats> Select);
 
@@ -212,25 +299,44 @@
         Recompare();
     }
 
+    // A slot takes a GPUMON log, its PicoLog, or both at once. A new GPUMON log alone clears the slot's PicoLog.
     private async Task SelectFileAsync(int index, InputFileChangeEventArgs args)
     {
         var slot = _runs[index];
-        var file = args.File;
         slot.Error = null;
-        try
+        var gotLog = false;
+        var gotPico = false;
+        foreach (var file in args.GetMultipleFiles(2))
         {
-            if (!Path.GetExtension(file.Name).Equals(".csv", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException($"'{file.Name}' is not a .csv file.");
-            await using var stream = file.OpenReadStream(50 * 1024 * 1024);
-            using var reader = new StreamReader(stream, Encoding.UTF8, true);
-            slot.Log = Analyzer.Parse(await reader.ReadToEndAsync());
-            slot.FileName = file.Name;
+            try
+            {
+                if (!Path.GetExtension(file.Name).Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"'{file.Name}' is not a .csv file.");
+                await using var stream = file.OpenReadStream(50 * 1024 * 1024);
+                using var reader = new StreamReader(stream, Encoding.UTF8, true);
+                var content = await reader.ReadToEndAsync();
+                if (PicoLogParser.LooksLikePicoLog(content))
+                {
+                    slot.Pico = PicoLogParser.Parse(content);
+                    slot.PicoName = file.Name;
+                    gotPico = true;
+                }
+                else
+                {
+                    slot.Log = Analyzer.Parse(content);
+                    slot.FileName = file.Name;
+                    gotLog = true;
+                }
+            }
+            catch (Exception exception)
+            {
+                slot.Error = exception.Message;
+            }
         }
-        catch (Exception exception)
+        if (gotLog && !gotPico)
         {
-            slot.Log = null;
-            slot.FileName = null;
-            slot.Error = exception.Message;
+            slot.Pico = null;
+            slot.PicoName = null;
         }
         Recompare();
     }
@@ -250,7 +356,8 @@
                 continue;
             }
             if (slot.Error?.StartsWith("No samples are within", StringComparison.Ordinal) == true) slot.Error = null;
-            results.Add(new RunResult(slot.Name, slot.FileName ?? slot.Name, analysis, RunColors[_runs.IndexOf(slot)]));
+            var tc = slot.Pico is null ? null : PicoLogParser.Match(slot.Pico, analysis.InRangeSamples);
+            results.Add(new RunResult(slot.Name, slot.FileName ?? slot.Name, analysis, RunColors[_runs.IndexOf(slot)], tc, ProjectChecks.Evaluate(analysis, tc, _settings)));
         }
         _results = results.Count >= 2 ? results : [];
         _chartsDirty = _results.Count >= 2;

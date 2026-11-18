@@ -437,32 +437,32 @@ window.gpuCharts = (() => {
 
     const thresholdScale = threshold => !Number.isFinite(threshold) ? {} : { suggestedMin: threshold - 1, suggestedMax: threshold + 1 };
 
-    const renderLine = (id, labels, data, label, color, threshold, inspect = false) => {
+    // series: [{ label, data, color, width?, dash? }]. The first `readout` series are shown in the synced value bar.
+    const renderSeries = (id, labels, series, threshold, inspect = false, readout = 1) => {
         if (!ensureChartJs()) return;
         const ctx = document.getElementById(id);
         if (!ctx) return;
         destroy(id);
         const expected = threshold === null || threshold === undefined ? Number.NaN : Number(threshold);
-        cache[id] = { kind: "line", labels, data, label, color, threshold: expected };
+        cache[id] = { kind: "line", labels, series, threshold: expected, readout };
         instances[id] = new Chart(ctx, {
             type: "line",
             data: {
                 labels,
-                datasets: [
-                    {
-                        label: label || "Series",
-                        data,
-                        borderColor: color || "#3b82f6",
-                        backgroundColor: "rgba(59,130,246,0.15)",
-                        borderWidth: 1.5,
-                        fill: false,
-                        pointRadius: 0,
-                        pointHoverRadius: inspect ? 3 : 0,
-                        tension: 0,
-                        spanGaps: true,
-                        ...thresholdDatasetStyle(expected, color || "#3b82f6"),
-                    },
-                ],
+                datasets: series.map((item, index) => ({
+                    label: item.label || "Series",
+                    data: item.data,
+                    borderColor: item.color || "#3b82f6",
+                    backgroundColor: item.color || "#3b82f6",
+                    borderWidth: item.width || 1.5,
+                    borderDash: item.dash || [],
+                    fill: false,
+                    pointRadius: 0,
+                    pointHoverRadius: inspect ? 3 : 0,
+                    tension: 0,
+                    spanGaps: true,
+                    ...(index === 0 ? thresholdDatasetStyle(expected, item.color || "#3b82f6") : {}),
+                })),
             },
             options: {
                 responsive: true,
@@ -472,7 +472,10 @@ window.gpuCharts = (() => {
                 // The small charts use the synced cursor/readout instead of Chart.js hover handling, which is much cheaper.
                 events: inspect ? ["mousemove", "mouseout", "click"] : [],
                 interaction: { mode: "index", intersect: false },
-                plugins: { legend: { display: inspect }, tooltip: { enabled: inspect, animation: false } },
+                plugins: {
+                    legend: { display: inspect || series.length > 1, labels: { color: "#cbd5e1", boxWidth: 14, font: { size: 10 } } },
+                    tooltip: { enabled: inspect, animation: false },
+                },
                 scales: {
                     x: { ticks: { autoSkip: true, maxTicksLimit: 8, maxRotation: 0, sampleSize: 24 } },
                     y: { beginAtZero: false, ticks: { sampleSize: 24 }, afterFit: fixedYAxisWidth, ...thresholdScale(expected) },
@@ -481,7 +484,13 @@ window.gpuCharts = (() => {
             plugins: [syncCursorPlugin, thresholdPlugin],
         });
         instances[id].$threshold = expected;
+        instances[id].$readout = readout;
     };
+
+    const renderLine = (id, labels, data, label, color, threshold, inspect = false) =>
+        renderSeries(id, labels, [{ label, data, color }], threshold, inspect);
+
+    const renderMultiLine = (id, labels, series, readout = 1) => renderSeries(id, labels, series, null, false, readout);
 
     // Transparent canvas layered over a chart. The hover cursor is drawn here, so moving the mouse
     // never re-renders the chart's lines, axes or grid.
@@ -655,19 +664,19 @@ window.gpuCharts = (() => {
             group.heading = document.createElement("strong");
             const values = document.createElement("div");
             values.className = "sync-values";
-            group.chips = charts.map(chart => {
+            group.chips = charts.flatMap(chart => chart.data.datasets.slice(0, chart.$readout || 1).map(dataset => {
                 const chip = document.createElement("span");
-                chip.style.setProperty("--sync-color", chart.data.datasets[0]?.borderColor || "#38bdf8");
+                chip.style.setProperty("--sync-color", dataset?.borderColor || "#38bdf8");
                 values.appendChild(chip);
-                return chip;
-            });
+                return { chip, dataset };
+            }));
             readout.append(group.heading, values);
         }
         group.heading.textContent = charts[0]?.data?.labels?.[index] || `Sample ${index + 1}`;
-        charts.forEach((chart, chartIndex) => {
-            const dataset = chart.data.datasets[0];
-            const numeric = Number(dataset?.data?.[index]);
-            group.chips[chartIndex].textContent = `${dataset?.label || "Metric"}: ${Number.isFinite(numeric) ? numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-"}`;
+        group.chips.forEach(({ chip, dataset }) => {
+            const value = dataset?.data?.[index];
+            const numeric = value === null || value === undefined ? Number.NaN : Number(value);
+            chip.textContent = `${dataset?.label || "Metric"}: ${Number.isFinite(numeric) ? numeric.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "-"}`;
         });
         readout.classList.add("show");
     };
@@ -753,7 +762,7 @@ window.gpuCharts = (() => {
         const render = () => {
             destroy(modalCanvasId);
             if (cached.kind === "line") {
-                renderLine(modalCanvasId, cached.labels, cached.data, cached.label, cached.color, cached.threshold, true);
+                renderSeries(modalCanvasId, cached.labels, cached.series, cached.threshold, true, cached.readout);
             } else if (cached.kind === "timeline") {
                 renderTimeline(modalCanvasId, cached.segments, cached.title, cached.highlights);
             }
@@ -928,18 +937,19 @@ window.gpuCharts = (() => {
                 type: "line",
                 data: {
                     labels: source.labels,
-                    datasets: [{
-                        label: source.label || "Series",
-                        data: source.data,
-                        borderColor: source.color || "#3b82f6",
-                        backgroundColor: source.color || "#3b82f6",
-                        borderWidth: 4,
-                        pointRadius: 1.6,
-                        pointHoverRadius: 3,
-                        tension: 0.18,
+                    datasets: source.series.map((item, index) => ({
+                        label: item.label || "Series",
+                        data: item.data,
+                        borderColor: item.color || "#3b82f6",
+                        backgroundColor: item.color || "#3b82f6",
+                        borderWidth: (item.width || 1.5) * 2.4,
+                        borderDash: (item.dash || []).map(length => length * 2),
+                        pointRadius: 0,
+                        tension: 0,
+                        spanGaps: true,
                         fill: false,
-                        ...thresholdDatasetStyle(source.threshold, source.color || "#3b82f6"),
-                    }],
+                        ...(index === 0 ? thresholdDatasetStyle(source.threshold, item.color || "#3b82f6") : {}),
+                    })),
                 },
                 options: {
                     responsive: false,
@@ -1184,5 +1194,5 @@ window.gpuCharts = (() => {
         syncGroups.comparison = group;
     };
 
-    return { renderLine, renderTimeline, timelineCommand, createMainSyncGroup, renderComparison, exportImage, destroy, openModalFrom };
+    return { renderLine, renderMultiLine, renderTimeline, timelineCommand, createMainSyncGroup, renderComparison, exportImage, destroy, openModalFrom };
 })();

@@ -13,12 +13,12 @@
 
 <div class="page-head">
     <h3>Analyze a GPU Monitor log</h3>
-    <p class="muted">Drop a GPUMON .csv to check TGP and review performance within the selected GPU utilization range.</p>
+    <p class="muted">Drop a GPUMON .csv to check TGP and review performance within the selected GPU utilization range. Add the matching PicoLog .csv for thermocouple averages.</p>
 </div>
 
 <div class="dropzone @(_dragOver ? "over" : "") @(_analysis is not null ? "compact" : "")"
      @ondragenter="() => _dragOver = true" @ondragleave="() => _dragOver = false" @ondrop="() => _dragOver = false">
-    <InputFile OnChange="OnFileSelectedAsync" accept=".csv,text/csv" class="dropzone-input" title="Choose a GPUMON .csv file" />
+    <InputFile OnChange="OnFilesSelectedAsync" multiple accept=".csv,text/csv" class="dropzone-input" title="Choose a GPUMON .csv (and optionally its PicoLog .csv)" />
     <div class="dropzone-text">
         @if (_isParsing)
         {
@@ -28,18 +28,30 @@
         else if (_sourceName is not null)
         {
             <strong>@_sourceName</strong>
-            <span>Drop another log or click to replace</span>
+            <span>@(_pico is null ? "Drop its PicoLog .csv to add thermocouples, or another GPUMON log to replace" : "Drop another log to replace")</span>
+        }
+        else if (_pico is not null)
+        {
+            <strong>PicoLog loaded</strong>
+            <span>Now drop the matching GPUMON .csv</span>
         }
         else
         {
             <strong>Drop a GPUMON .csv here</strong>
-            <span>or click to browse</span>
+            <span>optionally with its PicoLog .csv · or click to browse</span>
         }
     </div>
 </div>
 @if (_error is not null)
 {
     <div class="notice error" role="alert">@_error</div>
+}
+@if (_pico is not null)
+{
+    <div class="pico-chip">
+        <span>PicoLog: <b>@_picoName</b> · @_pico.Thermocouples.Count() TCs@(_pico.Chamber is null ? "" : " + chamber")@(_tc is null ? "" : $" · matched {_tc.MatchedSamples:N0} of {_tc.InRangeSamples:N0} in-range samples")</span>
+        <button type="button" title="Remove PicoLog" @onclick="RemovePico">×</button>
+    </div>
 }
 
 <div class="settings-wrap">
@@ -49,11 +61,12 @@
 @if (_analysis is not null && _log is not null)
 {
     var check = _analysis.TgpCheck;
+    var verdict = _verdict!;
     <section class="results">
         <div class="result-head">
             <div class="result-title">
                 <h4 title="@_sourceName">@_sourceName</h4>
-                <p>@_log.BrandName · VBIOS @_log.VbiosVersion · Driver @_log.DriverVersion@(TestDate is null ? "" : $" · {TestDate:yyyy-MM-dd}")@(DurationDisplay == "" ? "" : $" · {DurationDisplay}")</p>
+                <p>@_log.BrandName · VBIOS @_log.VbiosVersion · Driver @_log.DriverVersion@(TestDate is null ? "" : $" · {TestDate:yyyy-MM-dd}")</p>
             </div>
             <div class="result-actions">
                 <CopyToClipboard GetTextAsync="GetSummaryClipboardAsync" Tooltip="Copy summary" CopiedTooltip="Summary copied" />
@@ -61,10 +74,19 @@
             </div>
         </div>
 
-        <div class="verdict @TgpCssClass">
-            <div class="verdict-badge">@check.Verdict</div>
+        <div class="verdict @VerdictCssClass">
+            <div class="verdict-badge">@verdict.Verdict</div>
             <div class="verdict-body">
-                <div class="verdict-caption">TGP check · @_sourceName</div>
+                <div class="verdict-caption">@(verdict.HasLimitChecks ? "Result" : "TGP check") · @_sourceName</div>
+                @if (verdict.HasLimitChecks)
+                {
+                    <div class="verdict-checks">
+                        @foreach (var item in verdict.Checks)
+                        {
+                            <span class="check @(item.Passed switch { true => "ok", false => "bad", _ => "na" })">@(item.Passed switch { true => "✓", false => "✗", _ => "–" }) <b>@item.Name</b> @item.Detail</span>
+                        }
+                    </div>
+                }
                 <div class="verdict-main">
                     @Pct(check.PercentAtOrAbove) of in-range samples ≥ @Fmt(check.ExpectedWatts) W
                     <span>· required @Fmt(check.RequiredPercent)%</span>
@@ -82,9 +104,14 @@
                 </div>
             </div>
         </div>
+        <TestTimelineBar Timeline="_timeline!" PicoMatched="@(_tc is null ? null : $"{_tc.MatchedSamples:N0} of {_tc.InRangeSamples:N0} in-range samples matched")" />
         @if (_analysis.ReliabilityWarning is { } warning)
         {
             <div class="notice warn">@warning</div>
+        }
+        @if (_tc?.Warning is { } tcWarning)
+        {
+            <div class="notice warn">@tcWarning</div>
         }
 
         <table class="metrics-table">
@@ -92,7 +119,25 @@
             <tbody>
                 @foreach (var (label, stats) in MetricRows)
                 {
-                    <tr><th scope="row">@label</th><td>@Fmt(stats.Minimum)</td><td class="avg">@Fmt(stats.Average)</td><td>@Fmt(stats.Maximum)</td></tr>
+                    <tr>
+                        <th scope="row">@label</th>
+                        <td>@Fmt(stats.Minimum)</td>
+                        <td class="avg @LimitClass(label == GpuTempLabel ? "GPU temp avg" : null)">@Fmt(stats.Average)</td>
+                        <td class="@LimitClass(label == MemTempLabel ? "Memory temp max" : null)">@Fmt(stats.Maximum)</td>
+                    </tr>
+                }
+                @if (_tc is { MatchedSamples: > 0 } tc)
+                {
+                    <tr class="section-row"><th colspan="4">Thermocouples (°C) · PicoLog, same in-range time</th></tr>
+                    @foreach (var channel in tc.Channels.Where(channel => !channel.IsChamber))
+                    {
+                        <tr class="tc-row"><th scope="row">@channel.Name</th><td>@Fmt(channel.Stats.Minimum)</td><td class="avg">@Fmt(channel.Stats.Average)</td><td>@Fmt(channel.Stats.Maximum)</td></tr>
+                    }
+                    <tr class="tc-total"><th scope="row">All TCs (average)</th><td>@Fmt(tc.TcAverage.Minimum)</td><td class="avg @LimitClass("TC avg")">@Fmt(tc.TcAverage.Average)</td><td>@Fmt(tc.TcAverage.Maximum)</td></tr>
+                    @if (tc.Chamber is { } chamber)
+                    {
+                        <tr class="tc-row"><th scope="row">Chamber</th><td>@Fmt(chamber.Minimum)</td><td class="avg">@Fmt(chamber.Average)</td><td>@Fmt(chamber.Maximum)</td></tr>
+                    }
                 }
             </tbody>
         </table>
@@ -102,7 +147,7 @@
             <div class="charts-block">
                 <div id="main-chart-sync-readout" class="chart-sync-readout" aria-live="polite"><span class="readout-hint">Hover the charts to read every value at the same moment. Click a chart to expand it.</span></div>
                 <div class="chart-grid">
-                    @foreach (var (id, title) in ChartCards)
+                    @foreach (var (id, title) in VisibleChartCards)
                     {
                         <div class="chart-card @(id == "chart-power" ? "wide" : "")" @onclick="() => OpenChartModalAsync(id)" title="Click to expand">
                             <div class="chart-title">@title</div>
@@ -130,6 +175,10 @@
                 <dt>File</dt><dd>@_sourceName</dd>
                 <dt>Tool version</dt><dd>@_log.ToolVersion</dd>
                 <dt>Samples</dt><dd>@_analysis.InRangeSamples.Count.ToString("N0") of @_log.Samples.Count.ToString("N0") within @_analysis.UtilizationRange</dd>
+                @if (_picoName is not null)
+                {
+                    <dt>PicoLog</dt><dd>@_picoName · channels: @string.Join(", ", _pico!.Channels.Select(channel => channel.IsChamber ? $"{channel.Name} (chamber)" : channel.Name))</dd>
+                }
                 @if (_appliedPreset is not null)
                 {
                     <dt>Preset</dt><dd>@_appliedPreset (applied from file name)</dd>
@@ -184,6 +233,18 @@
     .verdict-caption{color:#94a3b8;font-size:.72rem;font-weight:600;overflow-wrap:anywhere}
     .verdict-main{color:#f8fafc;font-size:1.12rem;font-weight:700}
     .verdict-main span{color:#94a3b8;font-size:.86rem;font-weight:500}
+    .verdict-checks{display:flex;flex-wrap:wrap;gap:4px 14px;margin:3px 0 4px;font-size:.84rem}
+    .verdict-checks .check{color:#cbd5e1}
+    .verdict-checks .check.ok{color:#86efac}.verdict-checks .check.bad{color:#fca5a5}.verdict-checks .check.na{color:#94a3b8}
+    .verdict-checks b{font-weight:700}
+    .pico-chip{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;padding:6px 12px;border:1px solid #1e3a5f;border-radius:9px;background:#0d1729;color:#cbd5e1;font-size:.82rem}
+    .pico-chip b{color:#f8fafc}
+    .pico-chip button{border:0;background:none;color:#94a3b8;font-size:1.1rem;line-height:1;cursor:pointer}
+    .metrics-table td.over{color:#fca5a5!important}
+    .metrics-table td.under{color:#86efac!important}
+    .metrics-table .section-row th{background:#0f1a2e;color:#94a3b8;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;text-align:left}
+    .metrics-table .tc-row th{font-weight:500;color:#cbd5e1;padding-left:26px}
+    .metrics-table .tc-total th{color:#f8fafc}
     .verdict-detail{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:4px;color:#cbd5e1;font-size:.84rem}
     .verdict-detail b{color:#f8fafc}
     .metrics-table{width:100%;margin-top:14px;border-collapse:separate;border-spacing:0;border:1px solid #1f2d4a;border-radius:12px;overflow:hidden;font-variant-numeric:tabular-nums}
@@ -243,6 +304,13 @@
     private string? _pendingName;
     private string? _appliedPreset;
     private string? _error;
+    private PicoLog? _pico;
+    private string? _picoName;
+    // GPUMON file the PicoLog was added to; a new GPUMON log replaces both unless dropped together with a PicoLog.
+    private string? _picoPairedWith;
+    private ThermocoupleResult? _tc;
+    private ProjectVerdict? _verdict;
+    private TestTimeline? _timeline;
     private bool _isParsing;
     private bool _dragOver;
     private bool ShowChartModal { get; set; }
@@ -251,15 +319,24 @@
 
     private DateTime? TestDate => _analysis?.FirstInRangeTimestamp?.Date ?? _log?.StartTime?.Date;
     private string DurationDisplay => FormatSpan(_analysis?.InRangeSpan ?? TimeSpan.Zero);
-    private string TgpCssClass => _analysis?.TgpCheck.Passed switch { true => "pass", false => "fail", _ => "na" };
+    private string VerdictCssClass => _verdict?.Passed switch { true => "pass", false => "fail", _ => "na" };
+    private const string GpuTempLabel = "GPU temperature (°C)";
+    private const string MemTempLabel = "Memory temperature (°C)";
+
+    private IEnumerable<(string Id, string Title)> VisibleChartCards
+        => _tc is { MatchedSamples: > 0 } ? ChartCards.Append(("chart-tc", "Thermocouples (°C)")) : ChartCards;
+
+    // Colors the value checked by a project limit: red when it fails, green when it passes.
+    private string LimitClass(string? checkName)
+        => checkName is null ? "" : _verdict?.Checks.FirstOrDefault(check => check.Name == checkName)?.Passed switch { true => "under", false => "over", _ => "" };
     private IReadOnlyList<ActivitySummary> PStateSummary => _analysis?.PStateSummary ?? [];
     private IReadOnlyList<ActivitySummary> CappingSummary => _analysis?.CappingSummary ?? [];
 
     private IEnumerable<(string Label, MetricStats Stats)> MetricRows =>
     [
         ("TGP (W)", _analysis!.Tgp),
-        ("GPU temperature (°C)", _analysis.GpuTemperature),
-        ("Memory temperature (°C)", _analysis.MemoryTemperature),
+        (GpuTempLabel, _analysis.GpuTemperature),
+        (MemTempLabel, _analysis.MemoryTemperature),
         ("GPC clock (MHz)", _analysis.GpcClock),
         ("Memory clock (MHz)", _analysis.MemoryClock),
     ];
@@ -300,37 +377,67 @@
     private static string Fmt(decimal? v) => v.HasValue ? Math.Round(v.Value, 2, MidpointRounding.AwayFromZero).ToString("0.##", CultureInfo.InvariantCulture) : "–";
     private static string Pct(decimal? v) => v.HasValue ? Math.Round(v.Value, 2, MidpointRounding.AwayFromZero).ToString("0.00", CultureInfo.InvariantCulture) + "%" : "n/a";
 
-    private async Task OnFileSelectedAsync(InputFileChangeEventArgs e)
+    private async Task OnFilesSelectedAsync(InputFileChangeEventArgs e)
     {
         _dragOver = false;
         _error = null;
-        var file = e.File;
-        if (!Path.GetExtension(file.Name).Equals(".csv", StringComparison.OrdinalIgnoreCase))
-        {
-            _error = $"'{file.Name}' is not a .csv file. Choose the GPUMON .csv log.";
-            return;
-        }
-
+        var files = e.GetMultipleFiles(4);
+        GpuMonLog? newLog = null;
+        string? newLogName = null;
+        PicoLog? newPico = null;
+        string? newPicoName = null;
         _isParsing = true;
-        _pendingName = file.Name;
+        _pendingName = string.Join(" + ", files.Select(file => file.Name));
         StateHasChanged();
         try
         {
-            await using var stream = file.OpenReadStream(50 * 1024 * 1024);
-            using var reader = new StreamReader(stream, Encoding.UTF8, true);
-            var log = Analyzer.Parse(await reader.ReadToEndAsync());
-            _appliedPreset = _settingsBar is null ? null : await _settingsBar.ApplyForFileAsync(file.Name);
-            _log = log;
-            _sourceName = file.Name;
+            foreach (var file in files)
+            {
+                if (!Path.GetExtension(file.Name).Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                {
+                    _error = $"'{file.Name}' is not a .csv file. Choose the GPUMON .csv log (and optionally its PicoLog .csv).";
+                    continue;
+                }
+                try
+                {
+                    await using var stream = file.OpenReadStream(50 * 1024 * 1024);
+                    using var reader = new StreamReader(stream, Encoding.UTF8, true);
+                    var content = await reader.ReadToEndAsync();
+                    if (PicoLogParser.LooksLikePicoLog(content))
+                    {
+                        newPico = PicoLogParser.Parse(content);
+                        newPicoName = file.Name;
+                    }
+                    else
+                    {
+                        newLog = Analyzer.Parse(content);
+                        newLogName = file.Name;
+                    }
+                }
+                catch (IOException ex) when (ex.Message.Contains("length", StringComparison.OrdinalIgnoreCase))
+                {
+                    _error = $"'{file.Name}' is larger than 50 MB.";
+                }
+                catch (Exception ex)
+                {
+                    _error = $"Could not read '{file.Name}': {ex.Message}";
+                }
+            }
+
+            if (newLog is not null)
+            {
+                _appliedPreset = _settingsBar is null ? null : await _settingsBar.ApplyForFileAsync(newLogName!);
+                _log = newLog;
+                _sourceName = newLogName;
+                if (newPico is null && _picoPairedWith is not null) RemovePicoState();
+            }
+            if (newPico is not null)
+            {
+                _pico = newPico;
+                _picoName = newPicoName;
+            }
+            if (_pico is not null && _sourceName is not null) _picoPairedWith = _sourceName;
             Reanalyze();
-        }
-        catch (IOException ex) when (ex.Message.Contains("length", StringComparison.OrdinalIgnoreCase))
-        {
-            _error = $"'{file.Name}' is larger than 50 MB.";
-        }
-        catch (Exception ex)
-        {
-            _error = $"Could not read '{file.Name}': {ex.Message}";
         }
         finally
         {
@@ -338,27 +445,60 @@
         }
     }
 
+    private void RemovePicoState()
+    {
+        _pico = null;
+        _picoName = null;
+        _picoPairedWith = null;
+        _tc = null;
+    }
+
+    private void RemovePico()
+    {
+        RemovePicoState();
+        Reanalyze();
+    }
+
     private void OnSettingsChanged(SettingsChange change)
     {
         if (_analysis is null) return;
-        if (change == SettingsChange.Tgp)
+        switch (change)
         {
-            _analysis.TgpCheck = GpuMonLogAnalyzer.EvaluateTgp(_analysis.InRangeSamples, _settings.ExpectedTgpWatts, _settings.RequiredTgpPercent);
-            _ = RenderTgpChartAsync();
-            return;
+            case SettingsChange.Tgp:
+                _analysis.TgpCheck = GpuMonLogAnalyzer.EvaluateTgp(_analysis.InRangeSamples, _settings.ExpectedTgpWatts, _settings.RequiredTgpPercent);
+                UpdateVerdict();
+                _ = RenderTgpChartAsync();
+                break;
+            case SettingsChange.Limits:
+                UpdateVerdict();
+                break;
+            default:
+                Reanalyze();
+                break;
         }
-        Reanalyze();
     }
 
     private void Reanalyze()
     {
         if (_log is null) return;
         _analysis = Analyzer.Analyze(_log, _settings.UtilizationMin, _settings.UtilizationMax, _settings.ExpectedTgpWatts, _settings.RequiredTgpPercent);
+        _tc = _pico is null ? null : PicoLogParser.Match(_pico, _analysis.InRangeSamples);
+        _timeline = TestTimeline.From(_analysis, _tc);
+        UpdateVerdict();
         _chartsDirty = true;
     }
 
+    private void UpdateVerdict()
+        => _verdict = _analysis is null ? null : ProjectChecks.Evaluate(_analysis, _tc, _settings);
+
+    // jsPDF's built-in font has no ≥/≤ glyphs.
+    private static string Ascii(string text) => text.Replace("≥", ">=").Replace("≤", "<=").Replace("–", "-");
+
     private string SettingsLine(TgpCheckResult check)
         => $"GPU utilization {_analysis!.UtilizationRange} · Expected TGP {Fmt(check.ExpectedWatts)} W · Pass if >= {Fmt(check.RequiredPercent)}% of samples" +
+           (_settings.GpuTempAvgLimit is { } gpu ? $" · GPU temp avg <= {Fmt(gpu)} C" : "") +
+           (_settings.MemTempMaxLimit is { } mem ? $" · Memory temp max <= {Fmt(mem)} C" : "") +
+           (_settings.TcAvgLimit is { } tc ? $" · TC avg <= {Fmt(tc)} C" : "") +
            (_settings.PresetName is null ? "" : $" · Preset: {_settings.PresetName}");
 
     private Task<string> GetSummaryClipboardAsync()
@@ -368,15 +508,34 @@
         var check = a.TgpCheck;
         var sb = new StringBuilder();
         sb.AppendLine($"File: {_sourceName}");
+        if (_picoName is not null) sb.AppendLine($"PicoLog: {_picoName}");
         sb.AppendLine($"Settings: {SettingsLine(check)}");
+        if (_verdict is { HasLimitChecks: true } verdict)
+            sb.AppendLine($"Result: {verdict.Verdict} - " + string.Join("; ", verdict.Checks.Select(item => $"{item.Name} {Ascii(item.Detail)} {(item.Passed switch { true => "PASS", false => "FAIL", _ => "N/A" })}")));
         sb.AppendLine($"TGP check: {check.Verdict} - {Pct(check.PercentAtOrAbove)} of {check.SampleCount:N0} in-range samples >= {Fmt(check.ExpectedWatts)} W (required {Fmt(check.RequiredPercent)}%)" +
                       (check.PassingTgpWatts is null ? "" : $"; would pass up to {Fmt(check.PassingTgpWatts)} W"));
         if (a.ReliabilityWarning is { } warning) sb.AppendLine($"Warning: {warning}");
         sb.AppendLine($"Samples in range: {a.InRangeSamples.Count}/{_log.Samples.Count} ({a.CoveragePercent:0.#}%)");
         foreach (var (label, stats) in MetricRows)
             sb.AppendLine($"{label}  Min={Fmt(stats.Minimum)}  Avg={Fmt(stats.Average)}  Max={Fmt(stats.Maximum)}");
+        if (_tc is { MatchedSamples: > 0 } tc)
+        {
+            sb.AppendLine($"Thermocouples (C), {tc.MatchedSamples}/{tc.InRangeSamples} in-range samples matched:");
+            foreach (var channel in tc.Channels.Where(channel => !channel.IsChamber))
+                sb.AppendLine($"  {channel.Name}  Min={Fmt(channel.Stats.Minimum)}  Avg={Fmt(channel.Stats.Average)}  Max={Fmt(channel.Stats.Maximum)}");
+            sb.AppendLine($"  All TCs (average)  Min={Fmt(tc.TcAverage.Minimum)}  Avg={Fmt(tc.TcAverage.Average)}  Max={Fmt(tc.TcAverage.Maximum)}");
+            if (tc.Chamber is { } chamber) sb.AppendLine($"  Chamber  Min={Fmt(chamber.Minimum)}  Avg={Fmt(chamber.Average)}  Max={Fmt(chamber.Maximum)}");
+        }
+        if (_tc?.Warning is { } tcWarning) sb.AppendLine($"PicoLog warning: {tcWarning}");
         sb.AppendLine($"GPU: {_log.BrandName}  VBIOS: {_log.VbiosVersion}  Driver: {_log.DriverVersion}");
-        sb.AppendLine($"Date: {TestDate:yyyy-MM-dd}  Duration: {DurationDisplay}");
+        sb.AppendLine($"Date: {TestDate:yyyy-MM-dd}");
+        if (_timeline is { } timeline)
+        {
+            sb.AppendLine($"GPUMON log recorded: {TestTimeline.Range(timeline.LogStart, timeline.LogEnd)} ({TestTimeline.Span(timeline.LogDuration)})");
+            sb.AppendLine($"FurMark load (GPU utilization {timeline.UtilizationRange}): {timeline.LoadText}");
+            if (timeline.PicoStart is not null)
+                sb.AppendLine($"PicoLog recorded: {TestTimeline.Range(timeline.PicoStart, timeline.PicoEnd)} ({TestTimeline.Span(timeline.PicoEnd - timeline.PicoStart)})");
+        }
         return Task.FromResult(sb.ToString());
     }
 
@@ -395,7 +554,7 @@
         }
     }
 
-    private static readonly string[] SyncedCharts = ["chart-power", "chart-gpu", "chart-memory", "chart-gpc-clock", "chart-memory-clock"];
+    private string[] SyncedCharts => VisibleChartCards.Select(card => card.Id).ToArray();
 
     [SupplyParameterFromQuery(Name = "log")] public Guid? HandoffId { get; set; }
     private bool _applyPresetAfterHandoff;
@@ -405,6 +564,12 @@
         if (HandoffId is not { } id || Handoff.Get(id) is not { } handoff) return;
         _log = handoff.Log;
         _sourceName = handoff.FileName;
+        if (handoff.Pico is not null)
+        {
+            _pico = handoff.Pico;
+            _picoName = handoff.PicoName;
+            _picoPairedWith = handoff.FileName;
+        }
         _applyPresetAfterHandoff = true;
         Reanalyze();
     }
@@ -427,6 +592,7 @@
                 await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-memory", labels, samples.Select(s => s.MemoryTemperature).ToArray(), "Memory temperature (°C)", "#f97316");
                 await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-gpc-clock", labels, samples.Select(s => s.GpcClock).ToArray(), "GPC clock (MHz)", "#06b6d4");
                 await JS.InvokeVoidAsync("gpuCharts.renderLine", "chart-memory-clock", labels, samples.Select(s => s.MemoryClock).ToArray(), "Memory clock (MHz)", "#eab308");
+                if (_tc is { MatchedSamples: > 0 } tc) await RenderTcChartAsync(tc, labels);
                 await JS.InvokeVoidAsync("gpuCharts.createMainSyncGroup", "main-performance", SyncedCharts, "main-chart-sync-readout");
             }
 
@@ -441,6 +607,25 @@
             // Charts are optional if Chart.js is unavailable.
             Logger.LogWarning(ex, "Chart rendering failed.");
         }
+    }
+
+    private static readonly string[] TcColors = ["#a78bfa", "#f472b6", "#2dd4bf", "#fbbf24", "#60a5fa", "#fb923c"];
+
+    // TC average and chamber first (shown in the value bar), then each thermocouple as a thin line.
+    private async Task RenderTcChartAsync(ThermocoupleResult tc, string[] labels)
+    {
+        var tcIndexes = tc.Log.Channels.Select((channel, index) => (channel, index)).Where(item => !item.channel.IsChamber).Select(item => item.index).ToArray();
+        var series = new List<object>
+        {
+            new { label = "TC avg (°C)", data = tc.Aligned.Select(reading => reading is null ? null : PicoLogParser.TcMean(reading, tcIndexes)).ToArray(), color = "#e879f9", width = 2.2 },
+        };
+        var chamberIndex = tc.Log.Channels.Select((channel, index) => (channel, index)).FirstOrDefault(item => item.channel.IsChamber);
+        if (chamberIndex.channel is not null)
+            series.Add(new { label = "Chamber (°C)", data = tc.Aligned.Select(reading => reading?.Values[chamberIndex.index]).ToArray(), color = "#94a3b8", width = 1.5, dash = new[] { 5, 3 } });
+        var colorIndex = 0;
+        foreach (var index in tcIndexes)
+            series.Add(new { label = tc.Log.Channels[index].Name, data = tc.Aligned.Select(reading => reading?.Values[index]).ToArray(), color = TcColors[colorIndex++ % TcColors.Length], width = 0.9 });
+        await JS.InvokeVoidAsync("gpuCharts.renderMultiLine", "chart-tc", labels, series, chamberIndex.channel is null ? 1 : 2);
     }
 
     private async Task OpenChartModalAsync(string sourceId)
@@ -504,11 +689,27 @@
             var report = new
             {
                 SourceFile = _sourceName ?? "",
+                PicoFile = _picoName ?? "",
                 Settings = SettingsLine(tgp),
-                Warning = a.ReliabilityWarning,
+                Warning = string.Join(" ", new[] { a.ReliabilityWarning, _tc?.Warning }.Where(text => text is not null)) is { Length: > 0 } warning ? warning : null,
+                OverallVerdict = _verdict?.Verdict ?? tgp.Verdict,
+                Checks = _verdict is { HasLimitChecks: true } verdict
+                    ? verdict.Checks.Select(item => new { Name = item.Name, Detail = Ascii(item.Detail), Result = item.Passed switch { true => "PASS", false => "FAIL", _ => "N/A" } }).ToArray()
+                    : null,
+                Thermocouples = _tc is { MatchedSamples: > 0 } tc
+                    ? tc.Channels.Where(channel => !channel.IsChamber)
+                        .Select(channel => new { Name = channel.Name, Min = Fmt(channel.Stats.Minimum), Avg = Fmt(channel.Stats.Average), Max = Fmt(channel.Stats.Maximum) })
+                        .Append(new { Name = "All TCs (average)", Min = Fmt(tc.TcAverage.Minimum), Avg = Fmt(tc.TcAverage.Average), Max = Fmt(tc.TcAverage.Maximum) })
+                        .Concat(tc.Chamber is { } chamber ? [new { Name = "Chamber", Min = Fmt(chamber.Minimum), Avg = Fmt(chamber.Average), Max = Fmt(chamber.Maximum) }] : [])
+                        .ToArray()
+                    : null,
+                TcCoverage = _tc is null ? "" : $"{_tc.MatchedSamples:N0} of {_tc.InRangeSamples:N0} in-range samples matched",
                 ToolVersion = _log.ToolVersion,
                 Date = TestDate?.ToString("yyyy-MM-dd") ?? "",
                 Duration = DurationDisplay,
+                LogRecorded = _timeline is null ? "" : $"{TestTimeline.Range(_timeline.LogStart, _timeline.LogEnd)} ({TestTimeline.Span(_timeline.LogDuration)})",
+                LoadPeriod = _timeline?.LoadText ?? "",
+                PicoRecorded = _timeline?.PicoStart is null ? "" : $"{TestTimeline.Range(_timeline.PicoStart, _timeline.PicoEnd)} ({TestTimeline.Span(_timeline.PicoEnd - _timeline.PicoStart)})",
                 Coverage = $"{a.CoveragePercent.ToString("0.0", CultureInfo.InvariantCulture)}%",
                 MatchingRows = a.InRangeSamples.Count,
                 TotalRows = _log.Samples.Count,
